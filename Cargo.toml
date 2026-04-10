@@ -1,0 +1,52 @@
+[package]
+name = "rs-toml"
+version.workspace = true
+description = "Pure Rust TOML parser and emitter with span-preserving document access."
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+categories = ["parser-implementations", "config"]
+rust-version.workspace = true
+exclude = ["devsm.toml", "typos.toml"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[features]
+default = []
+derive = ["dep:rs-toml-macros"]
+serde = ["dep:serde"]
+
+[lib]
+name = "rs_toml"
+path = "src/lib.rs"
+
+[dependencies]
+foldhash.workspace = true
+serde = { workspace = true, features = ["std"], optional = true }
+thiserror.workspace = true
+rs-toml-macros = { package = "rs-toml-macros", path = "macros", optional = true }
+zmij.workspace = true
+
+[dev-dependencies]
+anstream.workspace = true
+anstyle-svg.workspace = true
+criterion.workspace = true
+oorandom.workspace = true
+pretty_assertions.workspace = true
+
+[[example]]
+name = "derive"
+required-features = ["derive"]
+
+[[bench]]
+name = "toml_core"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

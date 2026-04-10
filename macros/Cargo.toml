@@ -1,0 +1,15 @@
+[package]
+name = "rs-toml-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Derive macros for the workspace TOML parser and emitter."
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[lib]
+proc-macro = true
