@@ -1,6 +1,6 @@
 # rs-toml
 
-`rs-toml` is the workspace's main pure-Rust TOML parser, document/value model,
+`rs-toml` is a pure-Rust TOML parser, document/value model,
 emitter, and optional derive crate.
 
 The active crate shape is intentionally simple:
@@ -123,3 +123,11 @@ The committed source of truth is the top-level crate layout in this directory.
 That also applies to benchmarking and macro generation: the active sources of
 truth are [`benches/toml_core.rs`](./benches/toml_core.rs),
 [`scripts/bench.sh`](./scripts/bench.sh), and [`macros/`](./macros).
+
+## License and origin
+
+`rs-toml` is derived from [toml-spanner](https://github.com/exrok/toml-spanner)
+(Copyright (c) 2019 Embark Studios, 2026 Thomas Dagenais). It is licensed, like
+upstream, under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT](LICENSE-MIT) at your option. `diver/` holds upstream's benchmark and
+toml-test tooling; it is not part of the workspace build.

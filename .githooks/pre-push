@@ -1,0 +1,4 @@
+#!/bin/sh
+# Pre-push hook: run the mechanical pre-CI gate (AGENTS.md steps 3-7).
+# Enable once per clone: git config core.hooksPath .githooks
+exec mise run gate

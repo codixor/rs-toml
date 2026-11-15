@@ -1,3 +1,34 @@
+[workspace]
+members = [".", "macros"]
+# Upstream toml-spanner tooling (benchmarks, toml-test harness); built separately.
+exclude = ["diver"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/codixor/rs-toml"
+version = "0.1.0"
+
+[workspace.dependencies]
+foldhash = "0.2.0"
+serde = { version = "1.0.229", default-features = false }
+thiserror = "2.0.21"
+zmij = "1.0.23"
+anstream = "1.0.0"
+anstyle-svg = "1.1.1"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
+oorandom = "11.1.5"
+pretty_assertions = "1.4.1"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
 [package]
 name = "rs-toml"
 version.workspace = true
@@ -7,7 +38,8 @@ license.workspace = true
 readme = "README.md"
 categories = ["parser-implementations", "config"]
 rust-version.workspace = true
-exclude = ["devsm.toml", "typos.toml"]
+repository.workspace = true
+exclude = ["devsm.toml", "typos.toml", "diver"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
@@ -29,7 +61,7 @@ path = "src/lib.rs"
 foldhash.workspace = true
 serde = { workspace = true, features = ["std"], optional = true }
 thiserror.workspace = true
-rs-toml-macros = { package = "rs-toml-macros", path = "macros", optional = true }
+rs-toml-macros = { package = "rs-toml-macros", version = "0.1.0", path = "macros", optional = true }
 zmij.workspace = true
 
 [dev-dependencies]

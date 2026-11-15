@@ -3,7 +3,8 @@ name = "rs-toml-macros"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Derive macros for the workspace TOML parser and emitter."
+repository.workspace = true
+description = "Derive macros for the rs-toml TOML parser and emitter."
 rust-version.workspace = true
 
 [lints]

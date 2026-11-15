@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "timestamp": "2026-11-15T19:12:01.719Z",
+  "score": {
+    "grade": "A",
+    "numericScore": 100,
+    "breakdown": {
+      "secrets": 100,
+      "permissions": 100,
+      "hooks": 100,
+      "mcp": 100,
+      "agents": 100
+    }
+  },
+  "findings": []
+}

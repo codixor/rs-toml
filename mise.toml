@@ -1,0 +1,11 @@
+# The Rust toolchain is pinned in rust-toolchain.toml.
+[tools]
+"npm:ecc-agentshield" = "1.6.0"
+
+[tasks.gate]
+description = "Pre-CI gate (AGENTS.md steps 3-7): fmt, clippy, tests, dependency/feature/API/unsafe checks"
+run = "bash scripts/gate.sh"
+
+[tasks.ecc]
+description = "ECC AgentShield scan of tracked files, gated on agentshield-baseline.json"
+run = "sh scripts/ecc-scan.sh"
