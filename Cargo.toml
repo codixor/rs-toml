@@ -39,7 +39,7 @@ readme = "README.md"
 categories = ["parser-implementations", "config"]
 rust-version.workspace = true
 repository.workspace = true
-exclude = ["devsm.toml", "typos.toml", "diver"]
+include = ["src/**", "benches/**", "examples/**", "tests/**", "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE", "Cargo.toml"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
