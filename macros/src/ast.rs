@@ -562,9 +562,10 @@ pub fn extract_derive_target<'a>(
             ident,
             bounds: &[],
         });
-        let Some(generic) = target.generics.last_mut() else {
-            unsafe { std::hint::unreachable_unchecked() }
-        };
+        let generic = target
+            .generics
+            .last_mut()
+            .expect("generic was pushed on the previous line");
         if !at_colon {
             match match (toks).next() {
                 Some(t) => t,
@@ -1272,6 +1273,8 @@ pub fn parse_tuple_fields<'a>(
     }
 }
 struct DefaultFieldAttr(FieldAttrs);
+// SAFETY: the only instance is `DEFAULT_ATTR`, a const-initialised empty
+// value that is never mutated, so sharing `&DefaultFieldAttr` is read-only.
 unsafe impl Sync for DefaultFieldAttr {}
 static DEFAULT_ATTR: DefaultFieldAttr = const {
     DefaultFieldAttr(FieldAttrs {

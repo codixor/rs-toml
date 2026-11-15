@@ -1282,7 +1282,12 @@ impl<'de> Parser<'de> {
                 Err(e) => return Err(e),
             };
             self.eat_whitespace();
+            let mut value_depth = depth_remaining;
             while self.eat_byte(b'.') {
+                value_depth -= 1;
+                if value_depth < 0 {
+                    return Err(self.depth_exceeded());
+                }
                 self.eat_whitespace();
                 self.push_path(PathComponent::Key(key));
                 table_ref = match self.navigate_dotted_key(table_ref, key) {
@@ -1307,7 +1312,7 @@ impl<'de> Parser<'de> {
 
             self.push_path(PathComponent::Key(key));
             {
-                let val = match self.value(depth_remaining) {
+                let val = match self.value(value_depth) {
                     Ok(v) => v,
                     Err(e) => return Err(e),
                 };
@@ -1424,6 +1429,20 @@ impl<'de> Parser<'de> {
     /// Navigate into an existing or new table for a dotted-key intermediate
     /// segment. Checks frozen and header bits.
     /// New tables are created with the `DOTTED` tag.
+    /// Error for nesting deeper than [`MAX_RECURSION_DEPTH`]. Dotted keys and
+    /// header segments count toward the limit, so no input can build a tree
+    /// deep enough to overflow the stack of later recursive walks.
+    fn depth_exceeded(&mut self) -> Failed {
+        self.set_error(
+            self.cursor,
+            None,
+            ErrorKind::OutOfRange {
+                ty: &"Max recursion depth exceeded",
+                range: &"",
+            },
+        )
+    }
+
     fn navigate_dotted_key<'t>(
         &mut self,
         table: &'t mut InnerTable<'de>,
@@ -1899,8 +1918,13 @@ impl<'de> Parser<'de> {
             Ok(k) => k,
             Err(e) => return Err(e),
         };
+        let mut segments_left = MAX_RECURSION_DEPTH;
         loop {
             if self.eat_whitespace_to() == Some(b'.') {
+                segments_left -= 1;
+                if segments_left < 0 {
+                    return Err(self.depth_exceeded());
+                }
                 self.cursor += 1;
                 self.eat_whitespace();
                 self.push_path(PathComponent::Key(key));
@@ -1957,7 +1981,12 @@ impl<'de> Parser<'de> {
         };
         self.eat_whitespace();
 
+        let mut value_depth = MAX_RECURSION_DEPTH;
         while self.eat_byte(b'.') {
+            value_depth -= 1;
+            if value_depth < 0 {
+                return Err(self.depth_exceeded());
+            }
             self.eat_whitespace();
             self.push_path(PathComponent::Key(key));
             table_ref = match self.navigate_dotted_key(table_ref, key) {
@@ -1977,7 +2006,7 @@ impl<'de> Parser<'de> {
             return Err(e);
         }
         self.eat_whitespace();
-        let val = match self.value(MAX_RECURSION_DEPTH) {
+        let val = match self.value(value_depth) {
             Ok(v) => v,
             Err(e) => return Err(e),
         };

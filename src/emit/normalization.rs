@@ -1,7 +1,7 @@
 use crate::emit::partition::ensure_body_order;
 use crate::{Array, ArrayStyle, Item, Kind, Table, TableStyle, Value, ValueMut};
 impl<'de> Table<'de> {
-    fn normalize_inner(&mut self) -> &'de NormalizedTable<'de> {
+    fn normalize_inner(&mut self) -> &NormalizedTable<'de> {
         normalize_entries(self.value.entries_mut(), true);
         ensure_body_order(self.value.entries_mut());
         // SAFETY: NormalizedTable is #[repr(transparent)] over Table, so the
@@ -19,7 +19,7 @@ impl<'de> Table<'de> {
     /// would otherwise be unreachable, downgrades invalid
     /// array-of-tables to inline arrays, and fixes kind mismatches in
     /// nested contexts (e.g. a header table inside an inline table).
-    pub(crate) fn normalize(&mut self) -> &'de NormalizedTable<'de> {
+    pub(crate) fn normalize(&mut self) -> &NormalizedTable<'de> {
         self.normalize_inner()
     }
 

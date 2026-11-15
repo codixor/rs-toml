@@ -353,7 +353,7 @@ pub enum ErrorKind<'a> {
     /// EOF was reached when looking for a value.
     UnexpectedEof,
 
-    /// The input file is larger than the maximum supported size of 512 MiB.
+    /// The input file is larger than the maximum supported size of 256 MiB.
     FileTooLarge,
 
     /// An invalid character not allowed in a string was found.
@@ -643,7 +643,7 @@ fn kind_message_inner(kind: ErrorKind<'_>, out: &mut String) {
     match kind {
         ErrorKind::Custom(message) => s_push(out, message),
         ErrorKind::UnexpectedEof => s_push(out, "unexpected eof encountered"),
-        ErrorKind::FileTooLarge => s_push(out, "file is too large (maximum 512 MiB)"),
+        ErrorKind::FileTooLarge => s_push(out, "file is too large (maximum 256 MiB)"),
         ErrorKind::InvalidCharInString(c) => {
             s_push(out, "invalid character in string: `");
             push_escape(out, c);

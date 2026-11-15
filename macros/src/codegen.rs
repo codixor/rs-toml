@@ -3494,7 +3494,15 @@ pub fn inner_derive(stream: TokenStream) -> TokenStream {
             handle_enum(&mut rust_writer, &target, &variants);
         }
     }
-    let ts = rust_writer.split_off_stream(0);
+    let body = rust_writer.split_off_stream(0);
+    // Bring the prelude variants into the generated block explicitly, so a
+    // user's glob import of items named `Some`, `None`, `Ok` or `Err` cannot
+    // capture the generated code. Inner-scope imports shadow outer ones.
+    let mut ts: TokenStream = "#[allow(unused_imports)] use ::core::option::Option::{None, Some}; \
+         #[allow(unused_imports)] use ::core::result::Result::{Err, Ok};"
+        .parse()
+        .expect("static prelude tokens parse");
+    ts.extend(body);
     {
         let len = rust_writer.buf.len();
         rust_writer.blit_punct(15);

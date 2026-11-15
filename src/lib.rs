@@ -198,6 +198,11 @@ mod time;
 pub struct Failed;
 
 pub use arena::Arena;
+
+/// Largest capacity accepted by [`Table::try_with_capacity`] and
+/// [`Array::try_with_capacity`] (16 Mi entries, at most 768 MiB for a table).
+/// Larger requests return `None` instead of aborting on allocation failure.
+pub const MAX_CAPACITY: usize = 1 << 24;
 pub use de::FromTomlError;
 pub use de::{Context, FromFlattened, FromToml, TableHelper};
 pub use emit::Indent;

@@ -26,6 +26,8 @@ struct InnerError {
 #[derive(Debug)]
 pub(crate) struct Error(InnerError);
 
+// SAFETY: proc-macro spans are `!Send`, but proc macros run on one thread and
+// an `Error` never leaves the expansion that created it.
 unsafe impl Send for Error {}
 impl Error {
     pub(crate) fn to_compiler_error(&self, wrap: bool) -> TokenStream {

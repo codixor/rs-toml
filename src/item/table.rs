@@ -414,8 +414,11 @@ impl<'de> Table<'de> {
 
     /// Creates an empty table with pre-allocated capacity.
     ///
-    /// Returns `None` if `cap` exceeds `u32::MAX`.
+    /// Returns `None` if `cap` exceeds [`MAX_CAPACITY`](crate::MAX_CAPACITY).
     pub fn try_with_capacity(cap: usize, arena: &'de Arena) -> Option<Table<'de>> {
+        if cap > crate::MAX_CAPACITY {
+            return None;
+        }
         let cap: u32 = cap.try_into().ok()?;
         let mut meta = ItemMetadata::hints(TAG_TABLE, FLAG_TABLE);
         meta.set_auto_style();

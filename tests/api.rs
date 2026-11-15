@@ -33,3 +33,62 @@ fn formatting_preserved_from_source() {
         .unwrap();
     assert!(emitted.contains("key = \"updated\""));
 }
+
+// Dotted keys and header segments count toward the nesting limit, so input
+// cannot build a tree deep enough to overflow later recursive walks.
+fn assert_depth_error(source: &str) {
+    let arena = rs_toml::Arena::new();
+    let err = rs_toml::parse(source, &arena).unwrap_err();
+    assert!(
+        err.to_string().contains("Max recursion depth exceeded"),
+        "{err}"
+    );
+}
+
+#[test]
+fn deep_dotted_key_is_rejected() {
+    assert_depth_error(&format!("{}a = 1\n", "a.".repeat(100_000)));
+}
+
+#[test]
+fn deep_table_header_is_rejected() {
+    assert_depth_error(&format!("[{}a]\n", "a.".repeat(100_000)));
+    assert_depth_error(&format!("[[{}a]]\n", "a.".repeat(100_000)));
+}
+
+#[test]
+fn deep_dotted_key_in_inline_table_is_rejected() {
+    assert_depth_error(&format!("x = {{ {}a = 1 }}\n", "a.".repeat(100_000)));
+}
+
+#[test]
+fn dotted_keys_count_toward_value_depth() {
+    // 200 dotted segments plus 100 nested arrays exceed the limit together.
+    let source = format!(
+        "{}a = {}1{}\n",
+        "a.".repeat(200),
+        "[".repeat(100),
+        "]".repeat(100)
+    );
+    assert_depth_error(&source);
+}
+
+#[test]
+fn moderate_nesting_still_parses() {
+    let arena = rs_toml::Arena::new();
+    let source = format!(
+        "{}a = 1\n[{}b]\nc = 2\n",
+        "a.".repeat(100),
+        "h.".repeat(100)
+    );
+    let doc = rs_toml::parse(&source, &arena).unwrap();
+    assert!(format!("{:?}", doc.table()).contains('1'));
+}
+
+#[test]
+fn oversized_capacity_returns_none() {
+    let arena = rs_toml::Arena::new();
+    assert!(rs_toml::Table::try_with_capacity(rs_toml::MAX_CAPACITY + 1, &arena).is_none());
+    assert!(rs_toml::Array::try_with_capacity(rs_toml::MAX_CAPACITY + 1, &arena).is_none());
+    assert!(rs_toml::Table::try_with_capacity(8, &arena).is_some());
+}
