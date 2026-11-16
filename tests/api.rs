@@ -92,3 +92,30 @@ fn oversized_capacity_returns_none() {
     assert!(rs_toml::Array::try_with_capacity(rs_toml::MAX_CAPACITY + 1, &arena).is_none());
     assert!(rs_toml::Table::try_with_capacity(8, &arena).is_some());
 }
+
+/// Errors are moved across threads by callers (for example a service
+/// loading configuration on a worker); keep them `Send + Sync`.
+#[test]
+fn public_error_types_are_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync + 'static>() {}
+    assert_send_sync::<rs_toml::Error>();
+    assert_send_sync::<rs_toml::FromTomlError>();
+    assert_send_sync::<rs_toml::ToTomlError>();
+    assert_send_sync::<rs_toml::ErrorKind<'static>>();
+    #[cfg(feature = "serde")]
+    assert_send_sync::<rs_toml::serde::Error>();
+}
+
+/// Conversion errors are resolved to real paths before they are returned,
+/// so an error can outlive the document and arena and still be read on
+/// another thread.
+#[test]
+fn conversion_error_outlives_document_on_another_thread() {
+    let err = rs_toml::from_str::<std::collections::BTreeMap<String, u8>>("a = 1\nb = 'x'\n")
+        .unwrap_err();
+    let handle = std::thread::spawn(move || {
+        let error = &err.errors[0];
+        error.path().map(ToString::to_string)
+    });
+    assert_eq!(handle.join().unwrap().as_deref(), Some("b"));
+}

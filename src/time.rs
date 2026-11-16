@@ -371,8 +371,16 @@ impl PartialEq for DateTime {
             offset: u32,
             nanos: i16,
         }
-        // Safety: DateTime and Raw have identical layouts, so transmuting between them is safe.
+        const _: () = assert!(size_of::<Raw>() == size_of::<DateTime>());
+        const _: () = assert!(align_of::<Raw>() <= align_of::<DateTime>());
+        // SAFETY: DateTime is repr(C, align(8)) and 16 bytes (asserted
+        // above), like Raw. Raw's fields cover bytes 0..14 of DateTime: `date`
+        // (4 bytes, no padding: u16 + u8 + u8) and the four u8 fields form
+        // `header`, `nanos` is `offset`, `offset_minutes` is `nanos`. All of
+        // those bytes are initialized fields, and every bit pattern is valid
+        // for Raw's integers, so reading through `&Raw` is sound.
         let rhs = unsafe { &*(self as *const _ as *const Raw) };
+        // SAFETY: as above.
         let lhs = unsafe { &*(other as *const _ as *const Raw) };
         (rhs.header == lhs.header) & (rhs.offset == lhs.offset) & (rhs.nanos == lhs.nanos)
     }

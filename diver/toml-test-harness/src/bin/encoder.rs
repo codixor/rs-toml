@@ -1,110 +1,102 @@
-use jsony::Jsony;
-use std::{collections::HashMap, io::Read};
-use toml_spanner::{Arena, Array, DateTime, Formatting, Item, Key, Table};
+//! toml-test encoder: reads the toml-test JSON description on stdin and
+//! writes TOML produced by the rs-toml emitter on stdout.
 
-#[derive(Jsony)]
-#[jsony(untagged)]
-enum Toml {
-    Array(Vec<Toml>),
-    Scalar(Scalar),
-    Object(HashMap<String, Toml>),
-}
+use rs_toml::{Arena, Array, DateTime, Formatting, Item, Key, Table};
+use serde_json::{Map, Value as Json};
+use std::io::Read;
 
-mod parsed_string {
-    use std::{fmt::Display, str::FromStr};
+type Result<T> = std::result::Result<T, String>;
 
-    use jsony::json::DecodeError;
-    pub fn decode_json<T: FromStr>(
-        parser: &mut jsony::parser::Parser<'_>,
-    ) -> Result<T, &'static DecodeError>
-    where
-        T::Err: Display,
-    {
-        let text = parser.at.take_string(&mut parser.scratch)?;
-        match text.parse() {
-            Ok(value) => Ok(value),
-            Err(err) => {
-                parser.report_error(err.to_string());
-                Err(&DecodeError {
-                    message: "Failed to parse string",
-                })
-            }
-        }
+fn parse_float(text: &str) -> Result<f64> {
+    match text {
+        "nan" | "+nan" | "-nan" => Ok(f64::NAN),
+        "inf" | "+inf" => Ok(f64::INFINITY),
+        "-inf" => Ok(f64::NEG_INFINITY),
+        _ => text.parse().map_err(|e| format!("bad float {text:?}: {e}")),
     }
 }
 
-#[derive(Jsony)]
-#[jsony(tag = "type", content = "value", rename_all = "kebab-case")]
-enum Scalar {
-    String(String),
-    Integer(#[jsony(with = parsed_string)] i128),
-    Float(#[jsony(with = parsed_string)] f64),
-    Bool(#[jsony(with = parsed_string)] bool),
-    Datetime(#[jsony(with = parsed_string)] DateTime),
-    DatetimeLocal(#[jsony(with = parsed_string)] DateTime),
-    DateLocal(#[jsony(with = parsed_string)] DateTime),
-    TimeLocal(#[jsony(with = parsed_string)] DateTime),
+fn scalar<'a>(obj: &Map<String, Json>, arena: &'a Arena) -> Result<Item<'a>> {
+    let (Some(Json::String(kind)), Some(Json::String(value))) = (obj.get("type"), obj.get("value"))
+    else {
+        return Err("scalar must have string `type` and `value`".to_owned());
+    };
+    let item = match kind.as_str() {
+        "string" => Item::string(arena.alloc_str(value)),
+        "integer" => Item::from(
+            value
+                .parse::<i128>()
+                .map_err(|e| format!("bad integer {value:?}: {e}"))?,
+        ),
+        "float" => Item::from(parse_float(value)?),
+        "bool" => Item::from(match value.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return Err(format!("bad bool {value:?}")),
+        }),
+        "datetime" | "datetime-local" | "date-local" | "time-local" => Item::from(
+            value
+                .parse::<DateTime>()
+                .map_err(|e| format!("bad {kind} {value:?}: {e}"))?,
+        ),
+        _ => return Err(format!("unknown type {kind:?}")),
+    };
+    Ok(item)
 }
 
-fn convert<'a>(toml: &Toml, arena: &'a Arena) -> Item<'a> {
-    match toml {
-        Toml::Object(map) => {
-            let mut table = Table::new();
-            for (key, value) in map {
-                let key = Key::new(arena.alloc_str(key));
-                table.insert_unique(key, convert(value, arena), arena);
-            }
-            table.into_item()
-        }
-        Toml::Array(arr) => {
+/// A JSON object is a scalar description iff it has exactly the keys
+/// `type` and `value`, both strings.
+fn is_scalar(obj: &Map<String, Json>) -> bool {
+    obj.len() == 2 && matches!(obj.get("type"), Some(Json::String(_)))
+        && matches!(obj.get("value"), Some(Json::String(_)))
+}
+
+fn table<'a>(obj: &Map<String, Json>, arena: &'a Arena) -> Result<Table<'a>> {
+    let mut table = Table::new();
+    for (key, value) in obj {
+        let key = Key::new(arena.alloc_str(key));
+        table.insert_unique(key, convert(value, arena)?, arena);
+    }
+    Ok(table)
+}
+
+fn convert<'a>(json: &Json, arena: &'a Arena) -> Result<Item<'a>> {
+    match json {
+        Json::Object(obj) if is_scalar(obj) => scalar(obj, arena),
+        Json::Object(obj) => Ok(table(obj, arena)?.into_item()),
+        Json::Array(values) => {
             let mut array = Array::new();
-            for value in arr {
-                array.push(convert(value, arena), arena);
+            for value in values {
+                array.push(convert(value, arena)?, arena);
             }
-            array.into_item()
+            Ok(array.into_item())
         }
-        Toml::Scalar(scalar) => match scalar {
-            Scalar::String(s) => Item::string(arena.alloc_str(s)),
-            Scalar::Integer(i) => Item::from(*i),
-            Scalar::Float(f) => Item::from(*f),
-            Scalar::Bool(b) => Item::from(*b),
-            Scalar::Datetime(dt)
-            | Scalar::DatetimeLocal(dt)
-            | Scalar::DateLocal(dt)
-            | Scalar::TimeLocal(dt) => Item::from(*dt),
-        },
+        other => Err(format!("unexpected JSON value {other}")),
     }
+}
+
+fn run() -> Result<String> {
+    let mut buffer = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut buffer)
+        .map_err(|e| format!("failed to read stdin: {e}"))?;
+    let json: Json =
+        serde_json::from_slice(&buffer).map_err(|e| format!("invalid JSON input: {e}"))?;
+    let Json::Object(obj) = json else {
+        return Err("expected a top-level JSON object".to_owned());
+    };
+    let arena = Arena::new();
+    let table = table(&obj, &arena)?;
+    let bytes = Formatting::default().format_table_to_bytes(table, &arena);
+    String::from_utf8(bytes).map_err(|e| format!("emitter produced invalid UTF-8: {e}"))
 }
 
 fn main() {
-    let mut input = std::io::stdin();
-    let _ = input.lock();
-    let mut buffer = Vec::new();
-    let _ = input.read_to_end(&mut buffer);
-    let toml = match jsony::from_json_bytes::<Toml>(&buffer) {
-        Ok(toml) => toml,
+    match run() {
+        Ok(text) => print!("{text}"),
         Err(err) => {
-            eprintln!("Parsing JSON input failed: {}", err);
+            eprintln!("{err}");
             std::process::exit(1);
         }
-    };
-    let arena = Arena::new();
-    let table = match toml {
-        Toml::Object(map) => {
-            let mut table = Table::new();
-            for (key, value) in &map {
-                let key = Key::new(arena.alloc_str(key));
-                table.insert_unique(key, convert(value, &arena), &arena);
-            }
-            table
-        }
-        _ => {
-            eprintln!("Expected top-level JSON object");
-            std::process::exit(1);
-        }
-    };
-    let output = Formatting::default().format_table_to_bytes(table, &arena);
-    // SAFETY: emit produces valid UTF-8 TOML text
-    let text = unsafe { String::from_utf8_unchecked(output) };
-    print!("{text}");
+    }
 }

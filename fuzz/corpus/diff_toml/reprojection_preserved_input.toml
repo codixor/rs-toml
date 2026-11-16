@@ -1,0 +1,5 @@
+title = 'demo' # title comment
+
+[server]
+port = 8080
+mode = 'debug'

@@ -2,9 +2,12 @@
 name = "toml-test-harness"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Decoder/encoder adapters that run rs-toml against the toml-lang/toml-test suite."
+
+# Standalone: kept out of the main rs-toml workspace (root Cargo.toml excludes `diver`).
+[workspace]
 
 [dependencies]
-#jsony = { version = "0.1.8" }
-jsony.path = "/home/user/Projects/git/jsony/jsony"
-toml-spanner.path = "../.."
-toml-spanner.features = ["to-toml", "from-toml"]
+rs-toml = { path = "../.." }
+serde_json = "1.0.154"

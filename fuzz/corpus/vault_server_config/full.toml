@@ -1,0 +1,79 @@
+operators = ["sha256:abababababababababababababababababababababababababababababababab"]
+mlock = false
+require_encrypted_volume = true
+encrypted_volume_uuid = "0f6a2b1c-3d4e-4f50-8a9b-0c1d2e3f4a5b"
+log_level = "debug"
+allow_unaudited = false
+[listener]
+address = "[::1]:8200"
+tls_cert_file = "server.pem"
+tls_key_file = "server-key.pem"
+client_ca_file = "client-ca.pem"
+client_crl_files = ["a.crl", "b.crl"]
+device_mounts = ["pki-devices"]
+max_request_size = 2048
+max_buffered_bytes = 4096
+max_connections = 10
+max_connections_per_client = 2
+max_handshakes = 3
+max_handshakes_per_ip = 1
+max_in_flight = 4
+handshake_timeout = "5s"
+header_read_timeout = "10"
+body_read_timeout = "1m"
+idle_timeout = "1h"
+max_connection_age = "1d"
+tls_reload_interval = "0s"
+tls_server_names = ["vault.internal", "10.0.0.5"]
+rate_limit = { requests_per_second = 5, burst = 10 }
+[storage]
+type = "postgres"
+connection = "host=db dbname=vault"
+ca_file = "/ca.pem"
+max_connections = 4
+timeout = "20s"
+create_table = false
+table = "kv"
+[anchor]
+type = "file"
+path = "/var/lib/vault-anchor/counter"
+[[audit]]
+type = "file"
+path = "/var/log/vault/audit.log"
+[[outbound]]
+url = "https://hooks.example.org"
+ca_file = "/ca.pem"
+use = ["jwt", "webhooks", "audit"]
+[[outbound]]
+url = "syslog-tls://log.example.org:6514"
+ca_file = "/ca.pem"
+use = ["audit"]
+client_cert_file = "/c.pem"
+client_key_file = "/k.pem"
+[public]
+address = "0.0.0.0:8080"
+mounts = ["pki-clients", "pki"]
+device_enrollment = true
+idle_timeout = "60s"
+[public.rate_limit]
+requests_per_second = 1
+burst = 2
+[public.acme]
+address = "0.0.0.0:8443"
+base_url = "https://pki.corp.internal:8443"
+tls_cert_file = "/acme.pem"
+tls_key_file = "/acme-key.pem"
+[public.acme.validation]
+hosts = ["*.corp.internal"]
+networks = ["10.20.0.0/16"]
+http_port = 8080
+tls_port = 8443
+dns_resolvers = ["10.0.0.53:53"]
+[metrics]
+scrapers = ["spiffe://corp.internal/monitoring/prometheus"]
+refresh = "10m"
+[ui]
+dir = "/usr/share/vault-ui"
+[unix]
+path = "/run/cvault/api/vault.sock"
+mode = "0600"

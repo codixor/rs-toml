@@ -21,7 +21,17 @@ use std::char;
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
 
-const MAX_RECURSION_DEPTH: i16 = 256;
+/// Maximum container nesting depth of a parsed document.
+///
+/// The root table is at depth 0; every table, array or array-of-tables
+/// entry adds one level, however it was written: header segments
+/// (`[a.b]`, `[[a.b]]`, where an array of tables counts as two levels:
+/// the array and its entry), dotted keys (`a.b = 1`) and inline arrays
+/// and tables all draw on this one budget. No container in a successfully
+/// or recoverably parsed tree is deeper than this, which bounds the stack
+/// use of every recursive walk over the tree (emit, `Debug`, `Clone`,
+/// `FromToml`, serde).
+pub(crate) const MAX_RECURSION_DEPTH: i16 = 128;
 
 struct Ctx<'b, 'de> {
     /// The current table context.
@@ -30,6 +40,8 @@ struct Ctx<'b, 'de> {
     /// the parent array Value'arena `end_and_flag` field so its span can be
     /// extended alongside the entry.
     array_end_span: Option<&'b mut u32>,
+    /// Nesting depth of `table` (the root table is 0).
+    depth: i16,
 }
 
 /// Tables with at least this many entries use the hash index for lookups.
@@ -1426,15 +1438,26 @@ impl<'de> Parser<'de> {
         }
     }
 
-    /// Navigate into an existing or new table for a dotted-key intermediate
-    /// segment. Checks frozen and header bits.
-    /// New tables are created with the `DOTTED` tag.
-    /// Error for nesting deeper than [`MAX_RECURSION_DEPTH`]. Dotted keys and
-    /// header segments count toward the limit, so no input can build a tree
-    /// deep enough to overflow the stack of later recursive walks.
+    /// Error for nesting deeper than [`MAX_RECURSION_DEPTH`]. Header
+    /// segments, dotted keys and inline values share one cumulative budget,
+    /// so the depth of the whole tree is bounded by that constant.
     fn depth_exceeded(&mut self) -> Failed {
+        self.depth_exceeded_at(self.cursor)
+    }
+
+    /// Adds `levels` to `depth`, failing if the result exceeds
+    /// [`MAX_RECURSION_DEPTH`].
+    fn enter_levels(&mut self, depth: &mut i16, levels: i16) -> Result<(), Failed> {
+        *depth += levels;
+        if *depth > MAX_RECURSION_DEPTH {
+            return Err(self.depth_exceeded());
+        }
+        Ok(())
+    }
+
+    fn depth_exceeded_at(&mut self, at: usize) -> Failed {
         self.set_error(
-            self.cursor,
+            at,
             None,
             ErrorKind::OutOfRange {
                 ty: &"Max recursion depth exceeded",
@@ -1443,6 +1466,9 @@ impl<'de> Parser<'de> {
         )
     }
 
+    /// Navigate into an existing or new table for a dotted-key intermediate
+    /// segment. Checks frozen and header bits.
+    /// New tables are created with the `DOTTED` tag.
     fn navigate_dotted_key<'t>(
         &mut self,
         table: &'t mut InnerTable<'de>,
@@ -1496,6 +1522,7 @@ impl<'de> Parser<'de> {
         &mut self,
         st: &'b mut Table<'de>,
         key: Key<'de>,
+        depth: &mut i16,
     ) -> Result<&'b mut Table<'de>, Failed> {
         let table = &mut st.value;
 
@@ -1509,9 +1536,16 @@ impl<'de> Parser<'de> {
                 if existing.is_frozen() {
                     return Err(self.set_duplicate_key_error(existing_span, key.span));
                 }
+                if let Err(e) = self.enter_levels(depth, 1) {
+                    return Err(e);
+                }
                 // SAFETY: is_table() verified by the preceding check.
                 unsafe { Ok(existing.as_table_mut_unchecked()) }
             } else if existing.is_aot() {
+                // The array and its last entry are two levels.
+                if let Err(e) = self.enter_levels(depth, 2) {
+                    return Err(e);
+                }
                 // unwrap is safe since we just check it's an array of tables and thus a array.
                 let arr = existing.as_array_mut().unwrap();
                 self.push_path(PathComponent::Index(arr.len() - 1));
@@ -1526,6 +1560,9 @@ impl<'de> Parser<'de> {
                 Err(self.set_duplicate_key_error(existing_span, key.span))
             }
         } else {
+            if let Err(e) = self.enter_levels(depth, 1) {
+                return Err(e);
+            }
             let span = key.span;
             let inserted = self.insert_value_known_to_be_unique(
                 table,
@@ -1597,6 +1634,7 @@ impl<'de> Parser<'de> {
             Ok(Ctx {
                 table,
                 array_end_span: None,
+                depth: 0,
             })
         } else {
             let inserted = self.insert_value_known_to_be_unique(
@@ -1608,6 +1646,7 @@ impl<'de> Parser<'de> {
                 // SAFETY: Item::table_header() produces a table-tagged item.
                 table: unsafe { inserted.as_table_mut_unchecked() },
                 array_end_span: None,
+                depth: 0,
             })
         }
     }
@@ -1643,6 +1682,7 @@ impl<'de> Parser<'de> {
                     // SAFETY: Item::table_header() produces a table-tagged item.
                     table: unsafe { entry.as_table_mut_unchecked() },
                     array_end_span: Some(end_flag),
+                    depth: 0,
                 })
             } else if existing.is_table() {
                 Err(self.set_error(
@@ -1672,6 +1712,7 @@ impl<'de> Parser<'de> {
                 // SAFETY: Item::table_header() (used in with_single) produces a table-tagged item.
                 table: unsafe { entry.as_table_mut_unchecked() },
                 array_end_span: Some(end_flag),
+                depth: 0,
             })
         }
     }
@@ -1834,6 +1875,7 @@ impl<'de> Parser<'de> {
         let mut ctx = Ctx {
             table: root_st,
             array_end_span: None,
+            depth: 0,
         };
 
         #[cfg(debug_assertions)]
@@ -1877,6 +1919,7 @@ impl<'de> Parser<'de> {
                             Ctx {
                                 table: root_st,
                                 array_end_span: None,
+                                depth: 0,
                             }
                         }
                     };
@@ -1918,17 +1961,14 @@ impl<'de> Parser<'de> {
             Ok(k) => k,
             Err(e) => return Err(e),
         };
-        let mut segments_left = MAX_RECURSION_DEPTH;
+        // Depth of `current`; the root table is 0.
+        let mut depth: i16 = 0;
         loop {
             if self.eat_whitespace_to() == Some(b'.') {
-                segments_left -= 1;
-                if segments_left < 0 {
-                    return Err(self.depth_exceeded());
-                }
                 self.cursor += 1;
                 self.eat_whitespace();
                 self.push_path(PathComponent::Key(key));
-                current = match self.navigate_header_intermediate(current, key) {
+                current = match self.navigate_header_intermediate(current, key, &mut depth) {
                     Ok(p) => p,
                     Err(e) => return Err(e),
                 };
@@ -1959,11 +1999,24 @@ impl<'de> Parser<'de> {
         }
         let header_end = self.cursor as u32;
 
+        // The final segment adds a table, or an array plus its new entry.
+        depth += if is_array { 2 } else { 1 };
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(self.depth_exceeded_at(header_start as usize));
+        }
+
         self.push_path(PathComponent::Key(key));
-        if is_array {
+        let result = if is_array {
             self.navigate_header_array_final(current, key, header_start, header_end)
         } else {
             self.navigate_header_table_final(current, key, header_start, header_end)
+        };
+        match result {
+            Ok(mut ctx) => {
+                ctx.depth = depth;
+                Ok(ctx)
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -1981,7 +2034,8 @@ impl<'de> Parser<'de> {
         };
         self.eat_whitespace();
 
-        let mut value_depth = MAX_RECURSION_DEPTH;
+        // Container levels still allowed below the current table.
+        let mut value_depth = MAX_RECURSION_DEPTH - ctx.depth;
         while self.eat_byte(b'.') {
             value_depth -= 1;
             if value_depth < 0 {
@@ -2196,7 +2250,13 @@ impl std::fmt::Debug for Document<'_> {
 ///
 /// # Errors
 ///
-/// Returns an [`Error`] on the first syntax error encountered.
+/// Returns an [`Error`] on the first syntax error encountered, including
+/// "Max recursion depth exceeded" when containers nest more than 128
+/// levels deep. The limit counts the whole tree: header segments (an array
+/// of tables is two levels: the array and its entry), dotted keys and
+/// inline arrays and tables share it, so recursive walks of any parsed
+/// tree (emit, `Debug`, `Clone`, [`FromToml`](crate::FromToml), serde)
+/// have bounded stack use.
 ///
 /// # Examples
 ///

@@ -31,6 +31,12 @@ impl<T> Drop for MemoryPool<T> {
         let mut current_bucket = self.current_bucket;
         let mut current_size = self.current_size;
         while !current_bucket.is_null() {
+            // SAFETY: every non-null bucket in the `next` list was allocated
+            // in `alloc_default` with `Layout::new::<Bucket<T>>()` and is
+            // freed exactly once here. The newest bucket has `current_size`
+            // initialized slots and every older bucket is full, so
+            // `drop_in_place` only drops initialized `T`s. No `&mut T`
+            // handed out by an `Allocator` outlives the pool's borrow.
             unsafe {
                 let bucket = &mut *current_bucket;
                 std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(
@@ -52,6 +58,10 @@ pub struct Allocator<'a, T> {
 impl<'a, T: Default> Allocator<'a, T> {
     pub fn alloc_default(&mut self) -> &'a mut T {
         if self.inner.current_bucket.is_null() || self.inner.current_size >= FREAKY_BUCKET_SIZE {
+            // SAFETY: `Bucket<T>` has a non-zero size (it holds a pointer), so
+            // `alloc` is called with a valid layout; the result is checked
+            // for null. `next` is written through a raw field offset before
+            // any reference to the uninitialized bucket is created.
             unsafe {
                 let ptr = std::alloc::alloc(Layout::new::<Bucket<T>>()) as *mut Bucket<T>;
                 if ptr.is_null() {
@@ -65,6 +75,12 @@ impl<'a, T: Default> Allocator<'a, T> {
                 self.inner.current_size = 0;
             }
         }
+        // SAFETY: the bucket is non-null and `current_size <
+        // FREAKY_BUCKET_SIZE` (a new bucket was started above otherwise).
+        // `Bucket` is repr(C) with `data` first, so the bucket pointer is
+        // the first `MaybeUninit<T>` slot and `tail` is an unused slot in
+        // bounds. Each slot is handed out once, so the returned `&'a mut T`
+        // values never alias; they live no longer than the pool borrow.
         unsafe {
             let entries = self.inner.current_bucket as *mut T;
             let tail = entries.add(self.inner.current_size);

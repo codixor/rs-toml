@@ -1,9 +1,9 @@
 //! Serde serialization support for [`Spanned<T>`](crate::Spanned) and
 //! [`Item`].
 //!
-//! Enabled by the `serde` feature flag. This provides [`serde::Serialize`]
-//! implementations only — deserialization uses the [`FromToml`](crate::FromToml)
-//! trait instead.
+//! Enabled by the `serde` feature flag. This module provides
+//! [`serde::Serialize`] implementations; serde deserialization lives in
+//! [`crate::serde`].
 
 use crate::Spanned;
 use crate::item::Value;

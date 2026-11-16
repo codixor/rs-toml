@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.0 - 2026-11-16
+
+### Added
+- serde `Deserialize` support behind the `serde` feature: `rs_toml::serde`
+  with `from_str`, `from_document`, `from_item`, `ItemDeserializer` and a
+  spanned `Error` implementing `serde::de::Error`. It reads the tree built by
+  the existing parser and supports `deny_unknown_fields`, defaults, `Option`,
+  internally/externally/adjacently tagged and untagged enums, `flatten` and
+  `deserialize_with`. Integers are range checked, never wrapped; datetimes
+  deserialize as strings.
+
+### Fixed
+- The nesting limit is now one cumulative budget for the whole tree.
+  Previously table headers, dotted keys and inline values each had their
+  own 256-level allowance, so `[[a.a...]]` headers combined with dotted
+  keys and nested arrays could build a tree several hundred levels deep
+  and overflow the stack in later recursive walks (contrary to the 0.1.1
+  note). Every container now counts toward a single limit, measured from
+  the root, and an array of tables counts as two levels (the array and its
+  entry).
+
+- Unknown-variant errors from `from_str`/`FromToml` no longer quote the
+  offending value (it may be a secret); the span still locates it.
+
+### Changed
+- The nesting limit is lowered from 256 to 128 levels, so emit, `Debug`,
+  `Clone`, `FromToml` and serde (including untagged recursive enums) walk
+  any parsed tree within a 512 KiB stack in a debug build. Deeper input
+  fails with "Max recursion depth exceeded" and a span.
+- `rs_toml::serde::ItemDeserializer` returns an error instead of
+  recursing past the same limit, which guards trees built or edited
+  through the mutable API.
+- `rs_toml::serde::Error` messages never contain values from the document:
+  invalid types and values are described by kind (`invalid type: string,
+  expected u16`) and unknown enum variants are not quoted (`unknown
+  variant, expected `a` or `b``), because values may be secrets. Unknown
+  field names (table keys) are still quoted. Messages passed to
+  `Error::custom` by user `Deserialize` code are kept as written.
+- Integers beyond the 64-bit range deserialize into `i128`/`u128` fields;
+  where serde buffers input (`flatten`, untagged and internally tagged
+  enums, self-describing visitors) they fail with "integer out of 64-bit
+  range is not supported here" instead of a confusing type error.
+
 ## 0.1.1 — 2026-11-15
 
 ### Fixed

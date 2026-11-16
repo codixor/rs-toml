@@ -27,10 +27,10 @@ use crate::{
 /// This function walks the tree to find which table entry or array element each
 /// pointer belongs to, then replaces the uncomputed path with a real one.
 pub(crate) fn compute_paths(root: &Table<'_>, errors: &mut [Error]) {
-    let mut pending: Vec<(*const u8, &mut MaybeTomlPath)> = Vec::new();
+    let mut pending: Vec<(*const (), &mut MaybeTomlPath)> = Vec::new();
     for error in errors.iter_mut() {
         if error.path.is_uncomputed() {
-            pending.push((error.path.uncomputed_ptr() as *const u8, &mut error.path));
+            pending.push((error.path.uncomputed_ptr(), &mut error.path));
         }
     }
     if pending.is_empty() {
@@ -43,7 +43,7 @@ pub(crate) fn compute_paths(root: &Table<'_>, errors: &mut [Error]) {
 
 fn compute_paths_walk<'de>(
     item: &Item<'de>,
-    pending: &mut Vec<(*const u8, &mut MaybeTomlPath)>,
+    pending: &mut Vec<(*const (), &mut MaybeTomlPath)>,
     path_stack: &mut [PathComponent<'de>; 32],
     path_depth: usize,
 ) {
@@ -57,16 +57,16 @@ fn compute_paths_walk<'de>(
                 return;
             }
             let entry_size = std::mem::size_of::<(Key<'_>, Item<'_>)>();
-            let base = entries.as_ptr() as *const u8;
-            // SAFETY: entries is a valid slice; pointer arithmetic stays in bounds.
-            let end = unsafe { base.add(entries.len() * entry_size) };
+            // Compare plain addresses: the recorded pointer may have any
+            // provenance, so it is never offset or dereferenced.
+            let base = entries.as_ptr().addr();
+            let end = base + entries.len() * entry_size;
 
             let mut i = 0;
             while let Some((ptr, path)) = pending.get_mut(i) {
-                let ptr: *const u8 = *ptr;
-                // SAFETY: base+key_size is the address of the first Item in entries.
+                let ptr = ptr.addr();
                 if ptr >= base && ptr < end {
-                    let byte_offset = unsafe { ptr.byte_offset_from(base) } as usize;
+                    let byte_offset = ptr - base;
                     let entry_index = byte_offset / entry_size;
                     if entry_index < entries.len() {
                         path_stack[path_depth] = PathComponent::Key(entries[entry_index].0);
@@ -89,15 +89,14 @@ fn compute_paths_walk<'de>(
                 return;
             }
             let item_size = std::mem::size_of::<Item<'_>>();
-            let base = slice.as_ptr() as *const u8;
-            // SAFETY: slice is a valid slice; pointer arithmetic stays in bounds.
-            let end = unsafe { base.add(slice.len() * item_size) };
+            let base = slice.as_ptr().addr();
+            let end = base + slice.len() * item_size;
 
             let mut i = 0;
             while let Some((ptr, path)) = pending.get_mut(i) {
-                let ptr = *ptr;
+                let ptr = ptr.addr();
                 if ptr >= base && ptr < end {
-                    let byte_offset = unsafe { ptr.byte_offset_from(base) } as usize;
+                    let byte_offset = ptr - base;
                     let elem_index = byte_offset / item_size;
                     if elem_index < slice.len() {
                         path_stack[path_depth] = PathComponent::Index(elem_index);

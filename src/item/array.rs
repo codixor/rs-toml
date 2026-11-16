@@ -222,6 +222,10 @@ impl<'de> InternalArray<'de> {
             }
         }
         if run_start < len {
+            // SAFETY: src[run_start..len] are scalars (the loop above deep
+            // cloned every aggregate), so a bitwise copy is correct; both
+            // ranges are within `len` elements and the regions are disjoint
+            // (dst is a fresh arena allocation).
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     src.add(run_start),
