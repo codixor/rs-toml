@@ -94,7 +94,7 @@ fn normalize_inline(item: &mut Item<'_>, allow_dotted: bool) {
 #[allow(dead_code)]
 fn is_valid(table: &Table<'_>, body_emitted: bool) -> bool {
     for (_, item) in table {
-        if item.meta.is_auto_style() {
+        if item.meta().is_auto_style() {
             return false;
         }
         if item.has_dotted_bit() {
@@ -157,10 +157,10 @@ fn is_small_value(item: &Item<'_>) -> bool {
 }
 
 fn resolve_auto_table(sub: &mut Table<'_>, body_emitted: bool) {
-    if !sub.meta.is_auto_style() {
+    if !sub.meta().is_auto_style() {
         return;
     }
-    sub.meta.clear_auto_style();
+    sub.meta_mut().clear_auto_style();
     if !body_emitted {
         return;
     }
@@ -202,10 +202,10 @@ fn inline_width(item: &Item<'_>) -> Option<usize> {
 }
 
 fn resolve_auto_array(arr: &mut Array<'_>) {
-    if !arr.meta.is_auto_style() {
+    if !arr.meta().is_auto_style() {
         return;
     }
-    arr.meta.clear_auto_style();
+    arr.meta_mut().clear_auto_style();
 
     if arr.is_empty() {
         arr.set_style(ArrayStyle::Inline);

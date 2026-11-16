@@ -6,5 +6,6 @@
 //! anywhere else.
 
 pub(crate) mod arena;
+pub(crate) mod item;
 pub(crate) mod text;
 pub(crate) mod vec;

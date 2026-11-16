@@ -232,7 +232,7 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
     /// Prefer [`Item::table_helper`] inside [`FromToml`] implementations, or
     /// [`Document::table_helper`](crate::Document::table_helper) for the root table.
     pub fn new(ctx: &'ctx mut Context<'de>, table: &'t Table<'de>) -> Self {
-        let table_id = if table.len() > INDEXED_TABLE_THRESHOLD && table.meta.is_span_mode() {
+        let table_id = if table.len() > INDEXED_TABLE_THRESHOLD && table.meta().is_span_mode() {
             table.entries()[0].0.span.start as i32
         } else {
             -1

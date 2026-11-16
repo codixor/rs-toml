@@ -2,10 +2,8 @@
 #[path = "../../tests/unit/item/table.rs"]
 mod tests;
 
-use crate::Span;
 use crate::item::{
-    FLAG_DOTTED, FLAG_FROZEN, FLAG_HEADER, FLAG_TABLE, Item, ItemMetadata, Key, MaybeItem, NONE,
-    TAG_TABLE, TableStyle,
+    FLAG_DOTTED, FLAG_FROZEN, FLAG_HEADER, FLAG_TABLE, Item, Key, MaybeItem, NONE, TableStyle,
 };
 use crate::parser::KeyRef;
 use crate::raw::vec::ArenaVec;
@@ -215,106 +213,7 @@ impl<'de> Iterator for IntoIter<'de> {
 
 impl ExactSizeIterator for IntoIter<'_> {}
 
-/// A TOML table, a transient collection of key/value pairs inside an [`Item`].
-///
-/// `Table` is an intermediate structure for converting between Rust types and
-/// TOML through [`FromToml`] and [`ToToml`]. It is the top level value
-/// returned by [`parse`](crate::parse) and the value inside any `[section]`
-/// or inline `{ ... }` table.
-///
-/// <div class="warning">
-///
-/// Entries are stored in insertion order, but the TOML specification defines
-/// table keys as unordered. Avoid relying on iteration order for semantic
-/// purposes.
-///
-/// </div>
-///
-/// # Accessing values
-///
-/// Use `table["key"]` for index access, which returns a [`MaybeItem`] that
-/// never panics on missing keys and supports chained indexing. Use
-/// [`get`](Self::get) or [`get_mut`](Self::get_mut) for `Option` based access.
-///
-/// For structured extraction, use [`Item::table_helper`](crate::Item::table_helper)
-/// to create a [`TableHelper`](crate::de::TableHelper).
-///
-/// # Lookup performance
-///
-/// Direct lookups ([`get`](Self::get), `table["key"]`) perform a linear scan
-/// over entries, O(n) in the number of keys. For small tables or a handful
-/// of lookups, as is typical in TOML, this is fast enough.
-///
-/// For structured conversion of larger tables, use
-/// [`TableHelper`](crate::de::TableHelper) via
-/// [`Document::table_helper`](crate::Document::table_helper) or
-/// [`Item::table_helper`](crate::Item::table_helper), which use the
-/// parser's hash index for O(1) lookups.
-///
-/// # Constructing tables
-///
-/// To build a table programmatically, create one with [`Table::new`] and
-/// insert entries with [`Table::insert`]. An [`Arena`](crate::Arena) is
-/// required because entries are arena allocated.
-///
-/// # Iteration
-///
-/// `Table` implements [`IntoIterator`] (both by reference and by value),
-/// yielding `(`[`Key`]`, `[`Item`]`)` pairs.
-///
-/// [`FromToml`]: crate::FromToml
-/// [`ToToml`]: crate::ToToml
-#[repr(C)]
-pub struct Table<'de> {
-    pub(crate) value: InnerTable<'de>,
-    pub(crate) meta: ItemMetadata,
-}
-
-impl<'de> Table<'de> {
-    /// Creates an empty table in format-hints mode (no source span).
-    ///
-    /// The table starts with automatic style: normalization will choose
-    /// between inline and header based on content. Call [`set_style`](Self::set_style)
-    /// to override.
-    pub fn new() -> Table<'de> {
-        let mut meta = ItemMetadata::hints(TAG_TABLE, FLAG_TABLE);
-        meta.set_auto_style();
-        Table {
-            meta,
-            value: InnerTable::new(),
-        }
-    }
-
-    /// Creates an empty table with pre-allocated capacity.
-    ///
-    /// Returns `None` if `cap` exceeds [`MAX_CAPACITY`](crate::MAX_CAPACITY).
-    pub fn try_with_capacity(cap: usize, arena: &'de Arena) -> Option<Table<'de>> {
-        if cap > crate::MAX_CAPACITY {
-            return None;
-        }
-        let cap: u32 = cap.try_into().ok()?;
-        let mut meta = ItemMetadata::hints(TAG_TABLE, FLAG_TABLE);
-        meta.set_auto_style();
-        Some(Table {
-            meta,
-            value: InnerTable::with_capacity(cap, arena),
-        })
-    }
-
-    /// Creates an empty table in span mode (parser-produced).
-    pub(crate) fn new_spanned(span: Span) -> Table<'de> {
-        Table {
-            meta: ItemMetadata::spanned(TAG_TABLE, FLAG_TABLE, span.start, span.end),
-            value: InnerTable::new(),
-        }
-    }
-
-    /// Returns the source span, or `0..0` if this table was constructed
-    /// programmatically (format-hints mode).
-    pub fn span(&self) -> Span {
-        self.meta.span()
-    }
-}
+pub use crate::raw::item::Table;
 
 impl<'de> Default for Table<'de> {
     fn default() -> Self {
@@ -403,26 +302,6 @@ impl<'de> Table<'de> {
     pub fn iter(&self) -> std::slice::Iter<'_, TableEntry<'de>> {
         self.entries().iter()
     }
-
-    /// Converts this `Table` into an [`Item`] with the same span and payload.
-    pub fn as_item(&self) -> &Item<'de> {
-        // SAFETY: Table is #[repr(C)] { InnerTable, ItemMetadata }.
-        // Item  is #[repr(C)] { Payload,    ItemMetadata }.
-        // Payload is a union whose `table` field is ManuallyDrop<InnerTable>
-        // (#[repr(transparent)]). Both types are 24 bytes, align 8 (verified
-        // by const assertions). The field offsets match (data at 0..16,
-        // metadata at 16..24). Only a shared reference is returned, so no
-        // mutation can change the tag.
-        unsafe { &*(self as *const Table<'de>).cast::<Item<'de>>() }
-    }
-
-    /// Converts this `Table` into an [`Item`] with the same span and payload.
-    pub fn into_item(self) -> Item<'de> {
-        // SAFETY: Same layout argument as as_item(). Size and alignment
-        // equality verified by const assertions below. The tag in
-        // ItemMetadata is preserved unchanged through the transmute.
-        unsafe { std::mem::transmute(self) }
-    }
 }
 
 impl<'a, 'de> IntoIterator for &'a mut Table<'de> {
@@ -451,44 +330,41 @@ impl<'de> IntoIterator for Table<'de> {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<Table<'_>>() == std::mem::size_of::<Item<'_>>());
-const _: () = assert!(std::mem::align_of::<Table<'_>>() == std::mem::align_of::<Item<'_>>());
-
 impl<'de> Table<'de> {
     #[inline]
     pub(crate) fn span_start(&self) -> u32 {
-        self.meta.span_start()
+        self.meta().span_start()
     }
 
     #[inline]
     pub(crate) fn set_span_start(&mut self, v: u32) {
-        self.meta.set_span_start(v);
+        self.meta_mut().set_span_start(v);
     }
 
     #[inline]
     pub(crate) fn set_span_end(&mut self, v: u32) {
-        self.meta.set_span_end(v);
+        self.meta_mut().set_span_end(v);
     }
 
     #[inline]
     pub(crate) fn extend_span_end(&mut self, new_end: u32) {
-        self.meta.extend_span_end(new_end);
+        self.meta_mut().extend_span_end(new_end);
     }
 
     #[inline]
     pub(crate) fn set_header_flag(&mut self) {
-        self.meta.set_flag(FLAG_HEADER);
+        self.meta_mut().set_flag(FLAG_HEADER);
     }
 
     #[inline]
     pub(crate) fn set_dotted_flag(&mut self) {
-        self.meta.set_flag(FLAG_DOTTED);
+        self.meta_mut().set_flag(FLAG_DOTTED);
     }
 
     /// Returns the kind of this table (implicit, dotted, header, or inline).
     #[inline]
     pub fn style(&self) -> TableStyle {
-        match self.meta.flag() {
+        match self.meta().flag() {
             FLAG_DOTTED => TableStyle::Dotted,
             FLAG_HEADER => TableStyle::Header,
             FLAG_FROZEN => TableStyle::Inline,
@@ -505,17 +381,8 @@ impl<'de> Table<'de> {
             TableStyle::Header => FLAG_HEADER,
             TableStyle::Inline => FLAG_FROZEN,
         };
-        self.meta.set_flag(flag);
-        self.meta.clear_auto_style();
-    }
-
-    /// Deep-clones this table into `arena`. Keys and strings are shared
-    /// with the source.
-    pub fn clone_in(&self, arena: &'de Arena) -> Table<'de> {
-        Table {
-            value: self.value.clone_in(arena),
-            meta: self.meta,
-        }
+        self.meta_mut().set_flag(flag);
+        self.meta_mut().clear_auto_style();
     }
 }
 

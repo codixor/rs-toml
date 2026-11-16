@@ -125,7 +125,7 @@ fn reproject_table<'de>(
     span_identity: bool,
 ) -> bool {
     let is_body_parent = matches!(dest.style(), TableStyle::Dotted | TableStyle::Inline);
-    let ignore_style = dest.meta.ignore_source_style();
+    let ignore_style = dest.meta().ignore_source_style();
     let entries = dest.entries_mut();
 
     let mut last_table_kind: Option<TableStyle> = None;
@@ -718,7 +718,7 @@ fn reproject_array<'de>(
         }
 
         if reordered {
-            dest_entry.meta.set_array_reordered();
+            dest_entry.meta_mut().set_array_reordered();
         }
     }
 

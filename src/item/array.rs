@@ -3,9 +3,8 @@
 mod tests;
 
 use crate::MaybeItem;
-use crate::Span;
 use crate::arena::Arena;
-use crate::item::{ArrayStyle, FLAG_AOT, FLAG_ARRAY, Item, ItemMetadata, TAG_ARRAY};
+use crate::item::{ArrayStyle, FLAG_AOT, FLAG_ARRAY, Item};
 use crate::raw::vec::ArenaVec;
 
 /// Arena-backed storage of an array's items.
@@ -138,87 +137,9 @@ impl<'de> std::ops::Index<usize> for InternalArray<'de> {
     }
 }
 
-// Public Array wrapper (same layout as Item when tag == TAG_ARRAY)
-
-/// A TOML array with span information.
-///
-/// An `Array` stores [`Item`] elements in insertion order with arena-allocated
-/// backing storage. It carries the byte-offset [`Span`] from the source
-/// document.
-///
-/// # Accessing elements
-///
-/// - **Index operator**: `array[i]` returns a [`MaybeItem`] that never
-///   panics on out-of-bounds access.
-/// - **`get` / `get_mut`**: return `Option<&Item>` / `Option<&mut Item>`.
-/// - **Iteration**: `for item in &array { ... }`.
-///
-/// # Mutation
-///
-/// [`push`](Self::push) appends an element. An [`Arena`] is required because
-/// array storage is arena-allocated.
-#[repr(C)]
-pub struct Array<'de> {
-    pub(crate) value: InternalArray<'de>,
-    pub(crate) meta: ItemMetadata,
-}
-
-const _: () = assert!(std::mem::size_of::<Array<'_>>() == std::mem::size_of::<Item<'_>>());
-const _: () = assert!(std::mem::align_of::<Array<'_>>() == std::mem::align_of::<Item<'_>>());
+pub use crate::raw::item::Array;
 
 impl<'de> Array<'de> {
-    /// Creates an empty array in format-hints mode (no source span).
-    ///
-    /// The array starts with automatic style: normalization will choose
-    /// between inline and header (array-of-tables) based on content. Call
-    /// [`set_style`](Self::set_style) to override.
-    pub fn new() -> Self {
-        let mut meta = ItemMetadata::hints(TAG_ARRAY, FLAG_ARRAY);
-        meta.set_auto_style();
-        Self {
-            meta,
-            value: InternalArray::new(),
-        }
-    }
-
-    /// Creates an empty array with pre-allocated capacity.
-    ///
-    /// Returns `None` if `cap` exceeds [`MAX_CAPACITY`](crate::MAX_CAPACITY).
-    pub fn try_with_capacity(cap: usize, arena: &'de Arena) -> Option<Self> {
-        if cap > crate::MAX_CAPACITY {
-            return None;
-        }
-        let cap: u32 = cap.try_into().ok()?;
-        let mut meta = ItemMetadata::hints(TAG_ARRAY, FLAG_ARRAY);
-        meta.set_auto_style();
-        Some(Self {
-            meta,
-            value: InternalArray::with_capacity(cap, arena),
-        })
-    }
-
-    /// Creates an empty array in span mode (parser-produced).
-    #[cfg(test)]
-    pub(crate) fn new_spanned(span: Span) -> Self {
-        Self {
-            meta: ItemMetadata::spanned(TAG_ARRAY, FLAG_ARRAY, span.start, span.end),
-            value: InternalArray::new(),
-        }
-    }
-
-    /// Returns the byte-offset span of this array in the source document.
-    /// Only valid on parser-produced arrays (span mode).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn span_unchecked(&self) -> Span {
-        self.meta.span_unchecked()
-    }
-
-    /// Returns the source span, or `0..0` if this array was constructed
-    /// programmatically (format-hints mode).
-    pub fn span(&self) -> Span {
-        self.meta.span()
-    }
-
     /// Appends a value to the end of the array.
     #[inline]
     pub fn push(&mut self, value: Item<'de>, arena: &'de Arena) {
@@ -290,29 +211,10 @@ impl<'de> Array<'de> {
         self.value.as_mut_slice()
     }
 
-    /// Converts this `Array` into an [`Item`] with the same span and payload.
-    pub fn as_item(&self) -> &Item<'de> {
-        // SAFETY: Array is #[repr(C)] { InternalArray, ItemMetadata }.
-        // Item  is #[repr(C)] { Payload,       ItemMetadata }.
-        // Payload is a union whose `array` field is ManuallyDrop<InternalArray>
-        // (#[repr(transparent)]). Both types are 24 bytes, align 8 (verified
-        // by const assertions). The field offsets match (data at 0..16,
-        // metadata at 16..24). Only a shared reference is returned.
-        unsafe { &*(self as *const Array<'de>).cast::<Item<'de>>() }
-    }
-
-    /// Converts this `Array` into an [`Item`] with the same span and payload.
-    pub fn into_item(self) -> Item<'de> {
-        // SAFETY: Same layout argument as as_item(). Size and alignment
-        // equality verified by const assertions. The tag in ItemMetadata is
-        // preserved unchanged through the transmute.
-        unsafe { std::mem::transmute(self) }
-    }
-
     /// Returns the kind of this array (inline or header/array-of-tables).
     #[inline]
     pub fn style(&self) -> ArrayStyle {
-        match self.meta.flag() {
+        match self.meta().flag() {
             FLAG_AOT => ArrayStyle::Header,
             _ => ArrayStyle::Inline,
         }
@@ -325,17 +227,8 @@ impl<'de> Array<'de> {
             ArrayStyle::Inline => FLAG_ARRAY,
             ArrayStyle::Header => FLAG_AOT,
         };
-        self.meta.set_flag(flag);
-        self.meta.clear_auto_style();
-    }
-
-    /// Deep-clones this array into `arena`. Keys and strings are shared
-    /// with the source.
-    pub fn clone_in(&self, arena: &'de Arena) -> Array<'de> {
-        Array {
-            value: self.value.clone_in(arena),
-            meta: self.meta,
-        }
+        self.meta_mut().set_flag(flag);
+        self.meta_mut().clear_auto_style();
     }
 }
 

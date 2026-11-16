@@ -38,7 +38,7 @@ struct Ctx<'b, 'de> {
     /// If this table is an entry in an array-of-tables, a disjoint borrow of
     /// the parent array Value'arena `end_and_flag` field so its span can be
     /// extended alongside the entry.
-    array_end_span: Option<&'b mut u32>,
+    array_end_span: Option<crate::raw::item::EndSpan<'b>>,
     /// Nesting depth of `table` (the root table is 0).
     depth: i16,
 }
@@ -191,6 +191,18 @@ impl<'de> Parser<'de> {
         self.error_span = second;
         self.error_kind = Some(ErrorKind::DuplicateKey { first });
         Failed
+    }
+
+    /// Reports a broken internal invariant (an item that was just checked or
+    /// built as a table is not one) instead of panicking.
+    #[cold]
+    fn internal_table_error(&mut self) -> Failed {
+        let at = self.cursor;
+        self.set_error(
+            at,
+            None,
+            ErrorKind::Custom("internal parser error: expected a table".into()),
+        )
     }
 
     #[cold]
@@ -1445,14 +1457,16 @@ impl<'de> Parser<'de> {
             // header intermediate (e.g. `b` in `[a.b.c]`) is now being touched
             // by a dotted key in the body (e.g. `b.x = 1` inside `[a]`).
             if value.is_implicit_table() {
-                // SAFETY: is_table() verified by the guard above.
-                let t = unsafe { value.as_table_mut_unchecked() };
-                t.set_dotted_flag();
-                t.set_span_start(key.span.start);
-                t.set_span_end(key.span.end);
+                if let Some(t) = value.as_table_mut() {
+                    t.set_dotted_flag();
+                    t.set_span_start(key.span.start);
+                    t.set_span_end(key.span.end);
+                }
             }
-            // SAFETY: is_table() verified by the guard above.
-            unsafe { Ok(value.as_inner_table_mut_unchecked()) }
+            match value.as_table_mut() {
+                Some(t) => Ok(&mut t.value),
+                None => Err(self.internal_table_error()),
+            }
         } else {
             let span = key.span;
             let inserted = self.insert_value_known_to_be_unique(
@@ -1460,8 +1474,10 @@ impl<'de> Parser<'de> {
                 key,
                 Item::table_dotted(InnerTable::new(), span),
             );
-            // SAFETY: Item::table_dotted() produces a table-tagged item.
-            unsafe { Ok(inserted.as_inner_table_mut_unchecked()) }
+            match inserted.as_table_mut() {
+                Some(t) => Ok(&mut t.value),
+                None => Err(self.internal_table_error()),
+            }
         }
     }
 
@@ -1482,8 +1498,6 @@ impl<'de> Parser<'de> {
             let (existing_key, existing) = &mut table.entries_mut()[idx];
             let existing_span = existing_key.span;
 
-            // Note: I would use safey accessor heres but that would cause issues
-            // with NLL limitations.
             if existing.is_table() {
                 if existing.is_frozen() {
                     return Err(self.set_duplicate_key_error(existing_span, key.span));
@@ -1491,8 +1505,10 @@ impl<'de> Parser<'de> {
                 if let Err(e) = self.enter_levels(depth, 1) {
                     return Err(e);
                 }
-                // SAFETY: is_table() verified by the preceding check.
-                unsafe { Ok(existing.as_table_mut_unchecked()) }
+                match existing.as_table_mut() {
+                    Some(t) => Ok(t),
+                    None => Err(self.internal_table_error()),
+                }
             } else if existing.is_aot() {
                 // The array and its last entry are two levels.
                 if let Err(e) = self.enter_levels(depth, 2) {
@@ -1506,8 +1522,10 @@ impl<'de> Parser<'de> {
                 if !last.is_table() {
                     return Err(self.set_duplicate_key_error(existing_span, key.span));
                 }
-                // SAFETY: last.is_table() verified by the preceding check.
-                unsafe { Ok(last.as_table_mut_unchecked()) }
+                match last.as_table_mut() {
+                    Some(t) => Ok(t),
+                    None => Err(self.internal_table_error()),
+                }
             } else {
                 Err(self.set_duplicate_key_error(existing_span, key.span))
             }
@@ -1521,8 +1539,10 @@ impl<'de> Parser<'de> {
                 key,
                 Item::table(InnerTable::new(), span),
             );
-            // SAFETY: Item::table() produces a table-tagged item.
-            unsafe { Ok(inserted.as_table_mut_unchecked()) }
+            match inserted.as_table_mut() {
+                Some(t) => Ok(t),
+                None => Err(self.internal_table_error()),
+            }
         }
     }
     fn insert_value_known_to_be_unique<'t>(
@@ -1577,8 +1597,10 @@ impl<'de> Parser<'de> {
             if existing.has_dotted_bit() {
                 return Err(self.set_duplicate_key_error(first_key_span, key.span));
             }
-            // SAFETY: is_table() verified by the preceding checks.
-            let table = unsafe { existing.as_table_mut_unchecked() };
+            let table = match existing.as_table_mut() {
+                Some(t) => t,
+                None => return Err(self.internal_table_error()),
+            };
             table.set_header_flag();
             table.set_span_start(header_start);
             table.set_span_end(header_end);
@@ -1593,9 +1615,12 @@ impl<'de> Parser<'de> {
                 key,
                 Item::table_header(InnerTable::new(), Span::new(header_start, header_end)),
             );
+            let table = match inserted.as_table_mut() {
+                Some(t) => t,
+                None => return Err(self.internal_table_error()),
+            };
             Ok(Ctx {
-                // SAFETY: Item::table_header() produces a table-tagged item.
-                table: unsafe { inserted.as_table_mut_unchecked() },
+                table,
                 array_end_span: None,
                 depth: 0,
             })
@@ -1620,18 +1645,20 @@ impl<'de> Parser<'de> {
             let first_key_span = existing_key.span;
 
             if existing.is_aot() {
-                // SAFETY: is_aot verified by the preceding check, which implies is_array().
-                let (end_flag, arr) = unsafe { existing.split_array_end_flag() };
+                let Some((end_flag, arr)) = existing.split_array_end_flag() else {
+                    return Err(self.internal_table_error());
+                };
                 let entry_span = Span::new(header_start, header_end);
                 arr.push(
                     Item::table_header(InnerTable::new(), entry_span),
                     self.arena,
                 );
                 self.push_path(PathComponent::Index(arr.len() - 1));
-                let entry = arr.last_mut().unwrap();
+                let Some(table) = arr.last_mut().and_then(Item::as_table_mut) else {
+                    return Err(self.internal_table_error());
+                };
                 Ok(Ctx {
-                    // SAFETY: Item::table_header() produces a table-tagged item.
-                    table: unsafe { entry.as_table_mut_unchecked() },
+                    table,
                     array_end_span: Some(end_flag),
                     depth: 0,
                 })
@@ -1656,12 +1683,14 @@ impl<'de> Parser<'de> {
             );
             let inserted = self.insert_value_known_to_be_unique(table, key, array_val);
             self.push_path(PathComponent::Index(0));
-            // SAFETY: Item::array_aot() produces an array-tagged item.
-            let (end_flag, arr) = unsafe { inserted.split_array_end_flag() };
-            let entry = arr.last_mut().unwrap();
+            let Some((end_flag, arr)) = inserted.split_array_end_flag() else {
+                return Err(self.internal_table_error());
+            };
+            let Some(table) = arr.last_mut().and_then(Item::as_table_mut) else {
+                return Err(self.internal_table_error());
+            };
             Ok(Ctx {
-                // SAFETY: Item::table_header() (used in with_single) produces a table-tagged item.
-                table: unsafe { entry.as_table_mut_unchecked() },
+                table,
                 array_end_span: Some(end_flag),
                 depth: 0,
             })
@@ -2037,9 +2066,7 @@ impl<'de> Parser<'de> {
         ctx.table.extend_span_end(line_end);
 
         if let Some(end_flag) = &mut ctx.array_end_span {
-            let old = **end_flag;
-            let current = old >> item::FLAG_SHIFT;
-            **end_flag = (current.max(line_end) << item::FLAG_SHIFT) | (old & item::FLAG_MASK);
+            end_flag.extend(line_end);
         }
 
         Ok(())
