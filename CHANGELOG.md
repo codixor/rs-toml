@@ -21,6 +21,9 @@
   the root, and an array of tables counts as two levels (the array and its
   entry).
 
+- Unknown-variant errors from `from_str`/`FromToml` no longer quote the
+  offending value (it may be a secret); the span still locates it.
+
 ### Changed
 - The nesting limit is lowered from 256 to 128 levels, so emit, `Debug`,
   `Clone`, `FromToml` and serde (including untagged recursive enums) walk

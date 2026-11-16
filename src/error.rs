@@ -980,20 +980,8 @@ impl Error {
                     kind_message_inner(kind, out);
                 }
             }
-            ErrorKind::UnexpectedVariant { .. } => {
-                if let Some(value) = source.get(span.range()) {
-                    s_push(out, "unknown variant ");
-                    match value.split_once('\n') {
-                        Some((first, _)) => {
-                            s_push(out, first);
-                            s_push(out, "...");
-                        }
-                        None => s_push(out, value),
-                    }
-                } else {
-                    kind_message_inner(kind, out);
-                }
-            }
+            // Never quote the value: configs hold secrets. The span locates it.
+            ErrorKind::UnexpectedVariant { .. } => kind_message_inner(kind, out),
             _ => kind_message_inner(kind, out),
         }
     }
