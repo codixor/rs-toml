@@ -19,7 +19,6 @@ use crate::{
 };
 use std::char;
 use std::hash::{Hash, Hasher};
-use std::ptr::NonNull;
 
 /// Maximum container nesting depth of a parsed document.
 ///
@@ -68,41 +67,26 @@ const fn build_hex_table() -> [i8; 256] {
 static HEX: [i8; 256] = build_hex_table();
 
 /// Hash-map key that identifies a (table, key-name) pair without owning the
-/// string data.  The raw `key_ptr`/`len` point into either the input buffer
-/// or the arena; both are stable for the lifetime of the parse.
+/// string data. `key` points into either the input buffer or the arena.
 /// `first_key_span` is the `span.start()` of the **first** key ever inserted
 /// into the table and serves as a cheap, collision-free table discriminator.
 pub(crate) struct KeyRef<'de> {
-    key_ptr: NonNull<u8>,
-    len: u32,
+    key: &'de str,
     first_key_span: u32,
-    marker: std::marker::PhantomData<&'de str>,
 }
 
 impl<'de> KeyRef<'de> {
     #[inline]
     pub(crate) fn new(key: &'de str, first_key_span: u32) -> Self {
         KeyRef {
-            // SAFETY: str::as_ptr() is guaranteed non-null.
-            key_ptr: unsafe { NonNull::new_unchecked(key.as_ptr() as *mut u8) },
-            len: key.len() as u32,
+            key,
             first_key_span,
-            marker: std::marker::PhantomData,
         }
     }
-}
 
-impl<'de> KeyRef<'de> {
     #[inline]
     fn as_str(&self) -> &'de str {
-        // SAFETY: key_ptr and len were captured from a valid &'de str in new().
-        // The PhantomData<&'de str> ensures the borrow is live.
-        unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                self.key_ptr.as_ptr(),
-                self.len as usize,
-            ))
-        }
+        self.key
     }
 }
 
@@ -127,7 +111,9 @@ impl<'de> PartialEq for KeyRef<'de> {
 impl<'de> Eq for KeyRef<'de> {}
 
 struct Parser<'de> {
-    /// Raw bytes of the input. Always valid UTF-8 (derived from `&str`).
+    /// The input text.
+    src: &'de str,
+    /// Raw bytes of `src`.
     bytes: &'de [u8],
     cursor: usize,
     arena: &'de Arena,
@@ -160,6 +146,7 @@ impl<'de> Parser<'de> {
             0
         };
         Parser {
+            src: input,
             bytes,
             cursor,
             arena,
@@ -177,28 +164,11 @@ impl<'de> Parser<'de> {
         }
     }
 
-    /// Get a `&str` slice from the underlying bytes.
-    ///
-    /// # Safety
-    ///
-    /// - `start <= end <= self.bytes.len()`.
-    /// - `start` and `end` must lie on UTF-8 character boundaries within
-    ///   `self.bytes` (which is always valid UTF-8 because it was derived
-    ///   from a `&str`).
-    #[inline]
-    unsafe fn str_slice(&self, start: usize, end: usize) -> &'de str {
-        #[cfg(not(debug_assertions))]
-        unsafe {
-            std::str::from_utf8_unchecked(&self.bytes[start..end])
-        }
-        #[cfg(debug_assertions)]
-        match std::str::from_utf8(&self.bytes[start..end]) {
-            Ok(value) => value,
-            Err(err) => panic!(
-                "Invalid UTF-8 slice: bytes[{}..{}] is not valid UTF-8: {}",
-                start, end, err
-            ),
-        }
+    /// Get a `&str` slice of the input. `start` and `end` lie on character
+    /// boundaries: the parser only splits the input at ASCII delimiters.
+    #[inline(always)]
+    fn str_slice(&self, start: usize, end: usize) -> &'de str {
+        self.src.get(start..end).unwrap_or_default()
     }
 
     #[inline]
@@ -403,15 +373,10 @@ impl<'de> Parser<'de> {
     }
 
     fn read_keylike(&mut self) -> &'de str {
-        let start = self.cursor;
-        while let Some(b) = self.peek_byte() {
-            if !is_keylike_byte(b) {
-                break;
-            }
-            self.cursor += 1;
-        }
-        // SAFETY: keylike bytes are ASCII, always valid UTF-8 boundaries
-        unsafe { self.str_slice(start, self.cursor) }
+        // Keylike bytes are ASCII, so the run is a `str` on its own.
+        let (key, end) = crate::raw::text::keylike_run(self.src, self.cursor);
+        self.cursor = end;
+        key
     }
 
     fn read_table_key(&mut self) -> Result<Key<'de>, Failed> {
@@ -649,23 +614,17 @@ impl<'de> Parser<'de> {
                     };
 
                     let name = if let Some(mut s) = scratch {
-                        s.extend(&self.bytes[flush_from..end]);
-                        let committed = s.commit();
-                        // Safety: scratch contents are valid UTF-8 (built from
-                        // validated input and well-formed escape sequences).
-                        unsafe { std::str::from_utf8_unchecked(committed) }
+                        s.extend(self.str_slice(flush_from, end));
+                        s.commit()
                     } else {
-                        // Safety: content_start..end is validated UTF-8.
-                        unsafe { self.str_slice(content_start, end) }
+                        self.str_slice(content_start, end)
                     };
                     return Ok((Key { name, span }, multiline));
                 }
                 b'\\' if delim == b'"' => {
                     let arena = self.arena;
-                    // SAFETY: the closure only runs when scratch is None, so no
-                    // other Scratch or arena.alloc() call is active.
-                    let s = scratch.get_or_insert_with(|| unsafe { arena.scratch() });
-                    s.extend(&self.bytes[flush_from..i]);
+                    let s = scratch.get_or_insert_with(|| arena.scratch());
+                    s.extend(self.str_slice(flush_from, i));
                     if let Err(e) = self.read_basic_escape(s, start, multiline) {
                         return Err(e);
                     }
@@ -780,9 +739,7 @@ impl<'de> Parser<'de> {
             scratch.push(byte);
             return Ok(());
         };
-        let mut buf = [0u8; 4];
-        let len = chr.encode_utf8(&mut buf).len();
-        scratch.extend(&buf[..len]);
+        scratch.push_char(chr);
         Ok(())
     }
 
@@ -824,9 +781,7 @@ impl<'de> Parser<'de> {
     }
 
     fn next_char_for_error(&self) -> char {
-        // Safety: The input was valid UTF-8 via a &str
-        let text = unsafe { std::str::from_utf8_unchecked(self.bytes) };
-        if let Some(value) = text.get(self.cursor..) {
+        if let Some(value) = self.src.get(self.cursor..) {
             value.chars().next().unwrap_or(char::REPLACEMENT_CHARACTER)
         } else {
             char::REPLACEMENT_CHARACTER
@@ -1086,13 +1041,12 @@ impl<'de> Parser<'de> {
             ));
         }
 
-        // Safety: no other Scratch or arena.alloc() is active during float parsing.
-        let mut scratch = unsafe { self.arena.scratch() };
+        let mut scratch = self.arena.scratch();
 
         if sign == 0 {
             scratch.push(b'-');
         }
-        if !scratch.push_strip_underscores(s.as_bytes()) {
+        if !scratch.push_strip_underscores(s) {
             return Err(self.set_error(
                 s_start,
                 Some(s_end),
@@ -1111,7 +1065,7 @@ impl<'de> Parser<'de> {
                 ));
             }
             scratch.push(b'.');
-            if !scratch.push_strip_underscores(after.as_bytes()) {
+            if !scratch.push_strip_underscores(after) {
                 return Err(self.set_error(
                     s_start,
                     Some(self.cursor),
@@ -1129,7 +1083,7 @@ impl<'de> Parser<'de> {
             match self.peek_byte() {
                 Some(b) if is_keylike_byte(b) && b != b'-' => {
                     let next = self.read_keylike();
-                    if !scratch.push_strip_underscores(next.as_bytes()) {
+                    if !scratch.push_strip_underscores(next) {
                         return Err(self.set_error(
                             s_start,
                             Some(self.cursor),
@@ -1149,9 +1103,7 @@ impl<'de> Parser<'de> {
 
         // Scratch is not committed — arena pointer stays unchanged, space is
         // reused by subsequent allocations.
-        // SAFETY: scratch contains only ASCII digits, signs, dots, and 'e'/'E'
-        // copied from validated input via push_strip_underscores.
-        let n: f64 = match unsafe { std::str::from_utf8_unchecked(scratch.as_bytes()) }.parse() {
+        let n: f64 = match scratch.as_str().parse() {
             Ok(n) => n,
             // std's float parse error is always just "invalid float literal"
             Err(_) => {
@@ -1581,8 +1533,7 @@ impl<'de> Parser<'de> {
     ) -> &'t mut item::Item<'de> {
         let len = table.len();
         if len >= INDEXED_TABLE_THRESHOLD {
-            // SAFETY: len >= INDEXED_TABLE_THRESHOLD (>= 6), so the table is non-empty.
-            let table_id = unsafe { table.first_key_span_start_unchecked() };
+            let table_id = table.first_key_span_start();
             if len == INDEXED_TABLE_THRESHOLD {
                 for (i, (key, _)) in table.entries().iter().enumerate() {
                     self.index.insert(KeyRef::new(key.as_str(), table_id), i);
@@ -1733,8 +1684,7 @@ impl<'de> Parser<'de> {
             table.insert_unique(key, item, self.arena);
             return Ok(());
         }
-        // SAFETY: len >= INDEXED_TABLE_THRESHOLD (>= 6), so the table is non-empty.
-        let table_id = unsafe { table.first_key_span_start_unchecked() };
+        let table_id = table.first_key_span_start();
 
         // Note: if find a duplicate we bail out, terminating the parsing with an error.
         // Even if we did end up re-inserting no issues would come of it.
@@ -1767,8 +1717,7 @@ impl<'de> Parser<'de> {
         // NOTE: I would return a reference to actual entry here, however this
         // runs into all sorts of NLL limitations.
         if table.len() > INDEXED_TABLE_THRESHOLD {
-            // SAFETY: len > INDEXED_TABLE_THRESHOLD (> 6), so the table is non-empty.
-            let first_key_span = unsafe { table.first_key_span_start_unchecked() };
+            let first_key_span = table.first_key_span_start();
             self.index.get(&KeyRef::new(name, first_key_span)).copied()
         } else {
             table.find_index(name)
@@ -2360,10 +2309,7 @@ pub fn parse_recoverable<'de>(document: &'de str, arena: &'de Arena) -> Document
     }
 }
 
-#[inline]
-fn is_keylike_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
-}
+use crate::raw::text::is_keylike_byte;
 
 fn byte_describe(b: u8) -> &'static &'static str {
     match b {

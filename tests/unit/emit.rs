@@ -370,7 +370,7 @@ fn check_normalize(root: &mut Table<'_>) {
 }
 
 #[track_caller]
-fn emit_table(table: &crate::emit::NormalizedTable<'_>) -> String {
+fn emit_table(table: crate::emit::NormalizedTable<'_, '_>) -> String {
     let scratch = Arena::new();
     let mut buf = Vec::new();
     emit_with_config(table, &EmitConfig::default(), &scratch, &mut buf);

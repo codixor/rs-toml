@@ -199,8 +199,7 @@ pub mod flatten_any {
         let index = if parent.span().is_empty() {
             if parent.len() > 8 && errors.len() > 2 {
                 temporary_index = foldhash::HashMap::with_capacity(parent.len());
-                // Safety: length is greater the 8, thus more then 0
-                let table_id = unsafe { parent.value.first_key_span_start_unchecked() };
+                let table_id = parent.value.first_key_span_start();
                 let mut i = 0;
                 for (key, _) in parent.entries() {
                     temporary_index.insert(KeyRef::new(key.name, table_id), i);

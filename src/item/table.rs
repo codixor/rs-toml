@@ -89,8 +89,7 @@ impl<'de> InnerTable<'de> {
         index: &TableIndex<'_>,
     ) -> Option<&TableEntry<'de>> {
         if self.len() > crate::parser::INDEXED_TABLE_THRESHOLD {
-            // SAFETY: len > INDEXED_TABLE_THRESHOLD (> 6), so the table is non-empty.
-            let first_key_span = unsafe { self.first_key_span_start_unchecked() };
+            let first_key_span = self.first_key_span_start();
             let i = *index.get(&KeyRef::new(key, first_key_span))?;
             self.entries().get(i)
         } else {
@@ -110,8 +109,7 @@ impl<'de> InnerTable<'de> {
     ) -> Option<&TableEntry<'de>> {
         if self.len() > crate::parser::INDEXED_TABLE_THRESHOLD {
             if let Some(index) = index {
-                // SAFETY: len > INDEXED_TABLE_THRESHOLD (> 6), so the table is non-empty.
-                let first_key_span = unsafe { self.first_key_span_start_unchecked() };
+                let first_key_span = self.first_key_span_start();
                 let i = *index.get(&KeyRef::new(key, first_key_span))?;
                 return self.entries().get(i);
             }
@@ -168,15 +166,11 @@ impl<'de> InnerTable<'de> {
 
     /// Returns the span start of the first key. Used as a table discriminator
     /// in the parser's hash index.
-    ///
-    /// # Safety
-    ///
-    /// The table must be non-empty (`self.len > 0`).
     #[inline]
-    pub(crate) unsafe fn first_key_span_start_unchecked(&self) -> u32 {
-        debug_assert!(self.len > 0);
-        // SAFETY: caller guarantees len > 0, so the first entry is initialized.
-        unsafe { (*self.ptr.as_ptr()).0.span.start }
+    pub(crate) fn first_key_span_start(&self) -> u32 {
+        // Callers only ask for non-empty tables; an empty table has no
+        // indexed keys, so the fallback value is never looked up.
+        self.entries().first().map_or(0, |(key, _)| key.span.start)
     }
 
     /// Returns a slice of all entries.

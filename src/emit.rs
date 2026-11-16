@@ -106,7 +106,7 @@ fn trim_trailing_newline(buf: &mut Vec<u8>) {
 /// values that match their source are emitted verbatim from the original
 /// text, preserving formatting like literal strings, hex integers, etc.
 pub(crate) fn emit_with_config(
-    table: &NormalizedTable<'_>,
+    table: NormalizedTable<'_, '_>,
     config: &EmitConfig<'_>,
     arena: &Arena,
     buf: &mut Vec<u8>,
@@ -169,27 +169,11 @@ fn alloc_prefix<'b, 'de>(
     key_span: Span,
     parent: Option<&'b Prefix<'b, 'de>>,
 ) -> &'b Prefix<'b, 'de> {
-    // SAFETY:
-    // - `arena.alloc(size_of::<Prefix>())` returns memory suitably sized.
-    //   Prefix contains &str (align 8) + Span (align 4) + Option<&Prefix>
-    //   (align 8), so max field align is 8 which matches ALLOC_ALIGN.
-    // - `ptr::write` initializes the allocation with a valid Prefix.
-    // - The resulting &'b reference is valid for the arena's lifetime 'b.
-    unsafe {
-        let ptr = arena
-            .alloc(std::mem::size_of::<Prefix<'b, 'de>>())
-            .cast::<Prefix<'b, 'de>>()
-            .as_ptr();
-        std::ptr::write(
-            ptr,
-            Prefix {
-                name,
-                key_span,
-                parent,
-            },
-        );
-        &*ptr
-    }
+    arena.alloc_copy(Prefix {
+        name,
+        key_span,
+        parent,
+    })
 }
 
 fn build_segment_order(segments: &[Segment<'_, '_, '_>], ignore_source_order: bool) -> Vec<u64> {
@@ -1223,22 +1207,7 @@ fn arena_extend_prefix<'a, 'de>(
     name: &'de str,
     span: Span,
 ) -> &'a [(&'de str, Span)] {
-    let new_len = prefix.len() + 1;
-    let byte_size = new_len * std::mem::size_of::<(&str, Span)>();
-    let ptr = arena.alloc(byte_size);
-    let slice_ptr = ptr.as_ptr() as *mut (&'de str, Span);
-    // SAFETY:
-    // - `byte_size` is `new_len * size_of::<(&str, Span)>()`, so the arena
-    //   allocation is large enough for `new_len` elements.
-    // - `(&str, Span)` has align <= 8, matching ALLOC_ALIGN.
-    // - The copy writes `prefix.len()` elements from the old slice (disjoint
-    //   from the fresh arena allocation), then one more element at the end.
-    // - After both writes, all `new_len` elements are initialized.
-    unsafe {
-        std::ptr::copy_nonoverlapping(prefix.as_ptr(), slice_ptr, prefix.len());
-        std::ptr::write(slice_ptr.add(prefix.len()), (name, span));
-        std::slice::from_raw_parts(slice_ptr as *const (&'de str, Span), new_len)
-    }
+    arena.alloc_extended(prefix, (name, span))
 }
 
 /// Collects all leaf entries from an inline table, recursing through dotted chains.

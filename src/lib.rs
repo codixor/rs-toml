@@ -188,6 +188,7 @@ mod error;
 pub mod helper;
 mod item;
 mod parser;
+mod raw;
 mod ser;
 mod span;
 mod time;

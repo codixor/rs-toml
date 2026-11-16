@@ -217,18 +217,76 @@ impl Arena {
 
     /// Create a scratch buffer that writes into the arena's current slab.
     ///
-    /// # Safety
-    ///
-    /// The caller must not call `alloc` on this arena while the returned
-    /// `Scratch` is alive. The scratch exclusively owns the bump region.
-    pub(crate) unsafe fn scratch(&self) -> Scratch<'_> {
+    /// The scratch reserves the rest of the current slab by moving the bump
+    /// pointer to the slab end, so allocations made while it is alive come
+    /// from a new slab and can never overlap the scratch bytes. Committing or
+    /// dropping the scratch hands the unused tail back when nothing was
+    /// allocated in between.
+    pub(crate) fn scratch(&self) -> Scratch<'_> {
         let start = self.ptr.get();
-        let cap = self.end.get().as_ptr() as usize - start.as_ptr() as usize;
+        let end = self.end.get();
+        let cap = end.as_ptr() as usize - start.as_ptr() as usize;
+        self.ptr.set(end);
         Scratch {
             arena: self,
             start,
             len: 0,
             cap,
+        }
+    }
+
+    /// Moves `value` into the arena and returns a reference to it.
+    ///
+    /// `T: Copy` guarantees there is no destructor to run: the arena never
+    /// drops its contents.
+    #[allow(clippy::mut_from_ref, reason = "every call returns a fresh allocation")]
+    pub(crate) fn alloc_copy<T: Copy>(&self, value: T) -> &mut T {
+        const { assert!(std::mem::align_of::<T>() <= ALLOC_ALIGN) };
+        let ptr = self.alloc(std::mem::size_of::<T>()).cast::<T>();
+        // SAFETY: `ptr` is a fresh allocation of `size_of::<T>()` bytes,
+        // aligned to ALLOC_ALIGN >= align_of::<T>() (const-asserted), and
+        // disjoint from every other live allocation, so writing a `T` and
+        // handing out a unique reference bounded by `&self` is sound.
+        unsafe {
+            ptr.as_ptr().write(value);
+            &mut *ptr.as_ptr()
+        }
+    }
+
+    /// Allocates a slice holding a copy of `prefix` followed by `last`.
+    pub(crate) fn alloc_extended<T: Copy>(&self, prefix: &[T], last: T) -> &[T] {
+        const { assert!(std::mem::align_of::<T>() <= ALLOC_ALIGN) };
+        let len = prefix.len() + 1;
+        let size = len
+            .checked_mul(std::mem::size_of::<T>())
+            .expect("layout overflow");
+        let ptr = self.alloc(size).cast::<T>().as_ptr();
+        // SAFETY: `ptr` is a fresh, suitably aligned allocation of `len`
+        // elements, disjoint from `prefix`. The first `prefix.len()`
+        // elements are copied from `prefix` and the last is written, so all
+        // `len` elements are initialized before the slice is created.
+        unsafe {
+            std::ptr::copy_nonoverlapping(prefix.as_ptr(), ptr, prefix.len());
+            ptr.add(prefix.len()).write(last);
+            std::slice::from_raw_parts(ptr, len)
+        }
+    }
+
+    /// Allocates a slice of `len` copies of `value`.
+    #[allow(clippy::mut_from_ref, reason = "every call returns a fresh allocation")]
+    pub(crate) fn alloc_filled<T: Copy>(&self, len: usize, value: T) -> &mut [T] {
+        const { assert!(std::mem::align_of::<T>() <= ALLOC_ALIGN) };
+        let size = len
+            .checked_mul(std::mem::size_of::<T>())
+            .expect("layout overflow");
+        let ptr = self.alloc(size).cast::<T>().as_ptr();
+        // SAFETY: `ptr` is a fresh, suitably aligned allocation of `len`
+        // elements; every element is written before the slice is created.
+        unsafe {
+            for i in 0..len {
+                ptr.add(i).write(value);
+            }
+            std::slice::from_raw_parts_mut(ptr, len)
         }
     }
 
@@ -311,22 +369,21 @@ impl Drop for Arena {
     }
 }
 
-/// A temporary byte buffer that writes directly into an [`Arena`] slab.
+/// A temporary UTF-8 buffer that writes directly into an [`Arena`] slab.
 ///
-/// Scratch tracks its own write position without advancing the arena's bump
-/// pointer. On [`commit`](Scratch::commit) the arena pointer is advanced past
-/// the committed bytes. If the scratch is dropped without committing, the arena
-/// pointer is unchanged and the space is reused by subsequent allocations.
+/// Creating a scratch reserves the rest of the current slab (the arena's
+/// bump pointer moves to the slab end), so other allocations made while the
+/// scratch is alive come from a new slab and never alias it. On
+/// [`commit`](Scratch::commit) the written bytes stay allocated and the
+/// unused tail is returned; on drop without commit the whole reservation is
+/// returned. In both cases the tail is only returned when nothing else was
+/// allocated in between (the bump pointer is still at the reservation end).
 ///
 /// # Invariant
 ///
-/// While a `Scratch` is alive, nothing else may allocate from its arena
-/// (the contract of [`Arena::scratch`]): the bytes from `start` to the end
-/// of the slab belong to the scratch, but the arena's bump pointer still
-/// points at `start`, so an `alloc` would hand out the same bytes. Hence
-/// `arena.ptr == start` holds for the whole lifetime of the scratch
-/// (`grow_slow` moves both together), which `commit` and `grow_slow` check
-/// with `debug_assert`.
+/// `start..start + cap` is the reserved region of one slab, `len <= cap`,
+/// and `start..start + len` holds initialized, valid UTF-8 (every writer
+/// appends whole `str`s, `char`s or ASCII bytes).
 pub(crate) struct Scratch<'a> {
     arena: &'a Arena,
     start: NonNull<u8>,
@@ -335,25 +392,16 @@ pub(crate) struct Scratch<'a> {
 }
 
 impl<'a> Scratch<'a> {
+    /// Appends raw bytes that the caller's API guarantees form valid UTF-8
+    /// at a character boundary.
     #[inline]
-    pub fn push(&mut self, byte: u8) {
-        let len = self.len;
-        if len == self.cap {
-            self.grow_slow(1);
-        }
-        // Safety: len < cap, so start + len is within the slab.
-        unsafe {
-            self.start.as_ptr().add(len).write(byte);
-        }
-        self.len = len + 1;
-    }
-
-    #[inline]
-    pub fn extend(&mut self, bytes: &[u8]) {
+    fn extend_bytes(&mut self, bytes: &[u8]) {
         if bytes.len() > self.cap - self.len {
             self.grow_slow(bytes.len());
         }
-        // Safety: cap - len >= bytes.len(), so the copy is in bounds.
+        // SAFETY: cap - len >= bytes.len(), so the copy stays inside the
+        // reserved region; the source cannot overlap it because the region
+        // is not reachable through any other reference.
         unsafe {
             ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
@@ -364,12 +412,44 @@ impl<'a> Scratch<'a> {
         self.len += bytes.len();
     }
 
-    /// Push bytes while stripping underscores. Returns `false` if any
-    /// underscore is not placed between two ASCII digits.
+    /// Appends an ASCII byte. Non-ASCII input is replaced by `?` so the
+    /// buffer always stays valid UTF-8 (callers only pass ASCII).
     #[inline]
-    pub(crate) fn push_strip_underscores(&mut self, bytes: &[u8]) -> bool {
+    pub fn push(&mut self, byte: u8) {
+        debug_assert!(byte.is_ascii());
+        let byte = if byte.is_ascii() { byte } else { b'?' };
+        let len = self.len;
+        if len == self.cap {
+            self.grow_slow(1);
+        }
+        // SAFETY: len < cap, so start + len is within the reserved region.
+        unsafe {
+            self.start.as_ptr().add(len).write(byte);
+        }
+        self.len = len + 1;
+    }
+
+    /// Appends a character as UTF-8.
+    #[inline]
+    pub fn push_char(&mut self, ch: char) {
+        let mut buf = [0u8; 4];
+        self.extend_bytes(ch.encode_utf8(&mut buf).as_bytes());
+    }
+
+    /// Appends a string.
+    #[inline]
+    pub fn extend(&mut self, text: &str) {
+        self.extend_bytes(text.as_bytes());
+    }
+
+    /// Push text while stripping underscores. Returns `false` if any
+    /// underscore is not placed between two ASCII digits.
+    ///
+    /// Removing ASCII `_` bytes from valid UTF-8 keeps it valid UTF-8.
+    #[inline]
+    pub(crate) fn push_strip_underscores(&mut self, text: &str) -> bool {
         let mut prev = 0u8;
-        for &b in bytes {
+        for &b in text.as_bytes() {
             if b == b'_' {
                 if !prev.is_ascii_digit() {
                     return false;
@@ -378,7 +458,11 @@ impl<'a> Scratch<'a> {
                 if prev == b'_' && !b.is_ascii_digit() {
                     return false;
                 }
-                self.push(b);
+                if b.is_ascii() {
+                    self.push(b);
+                } else {
+                    self.extend_bytes(&[b]);
+                }
             }
             prev = b;
         }
@@ -390,31 +474,40 @@ impl<'a> Scratch<'a> {
         if self.len == 0 {
             return &[];
         }
-        // Safety: start..start+len was written by us and is within the slab.
+        // SAFETY: start..start+len was written by us and is within the slab.
         unsafe { std::slice::from_raw_parts(self.start.as_ptr(), self.len) }
     }
 
-    /// Finalize the scratch data and return it as a byte slice tied to the
-    /// arena's lifetime. Advances the arena's bump pointer past the committed
-    /// bytes.
-    pub fn commit(self) -> &'a [u8] {
-        if self.len == 0 {
-            return &[];
-        }
-        debug_assert_eq!(
-            self.arena.ptr.get(),
-            self.start,
-            "arena allocated while a Scratch was alive"
-        );
-        // Safety: start..start+len is valid scratch memory within the arena.
-        let slice = unsafe { std::slice::from_raw_parts(self.start.as_ptr(), self.len) };
-        // Safety: start + len is within the slab (we ensured capacity on every write).
-        unsafe {
-            self.arena
+    /// The written text.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        // SAFETY: the buffer only ever receives whole `str`s, `char`s and
+        // ASCII bytes (struct invariant), so it is valid UTF-8.
+        unsafe { std::str::from_utf8_unchecked(self.as_bytes()) }
+    }
+
+    /// Finalize the scratch data and return it as a string tied to the
+    /// arena's lifetime. The written bytes stay allocated.
+    pub fn commit(self) -> &'a str {
+        let len = self.len;
+        let start = self.start;
+        let reserved_end = start.as_ptr() as usize + self.cap;
+        let arena = self.arena;
+        std::mem::forget(self);
+        if arena.ptr.get().as_ptr() as usize == reserved_end {
+            // SAFETY: start + len <= start + cap, inside the reserved region
+            // of the current slab; deriving from `start` keeps provenance.
+            arena
                 .ptr
-                .set(NonNull::new_unchecked(self.start.as_ptr().add(self.len)));
+                .set(unsafe { NonNull::new_unchecked(start.as_ptr().add(len)) });
         }
-        slice
+        if len == 0 {
+            return "";
+        }
+        // SAFETY: start..start+len is initialized, valid UTF-8 (struct
+        // invariant) and is never written again: it is now below the bump
+        // pointer, or in a slab the arena has moved past.
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(start.as_ptr(), len)) }
     }
 
     #[cold]
@@ -422,25 +515,33 @@ impl<'a> Scratch<'a> {
     fn grow_slow(&mut self, additional: usize) {
         let required = self.len.checked_add(additional).expect("scratch overflow");
         let new_cap = self.cap.saturating_mul(2).max(required);
-        debug_assert_eq!(
-            self.arena.ptr.get(),
-            self.start,
-            "arena allocated while a Scratch was alive"
-        );
 
         self.arena.grow(new_cap);
 
         // Copy existing scratch data to the start of the new slab.
         let new_start = self.arena.ptr.get();
+        let new_end = self.arena.end.get();
         if self.len > 0 {
-            // Safety: old data at self.start..+len is still valid (old slab hasn't been freed).
-            // New slab has at least new_cap bytes of data space >= required > self.len.
+            // SAFETY: the old data at start..+len is still valid (slabs are
+            // only freed when the arena drops). The new slab has at least
+            // new_cap >= required > len bytes and is disjoint from the old.
             unsafe {
                 ptr::copy_nonoverlapping(self.start.as_ptr(), new_start.as_ptr(), self.len);
             }
         }
         self.start = new_start;
-        self.cap = self.arena.end.get().as_ptr() as usize - new_start.as_ptr() as usize;
+        self.cap = new_end.as_ptr() as usize - new_start.as_ptr() as usize;
+        // Reserve the new slab.
+        self.arena.ptr.set(new_end);
+    }
+}
+
+impl Drop for Scratch<'_> {
+    fn drop(&mut self) {
+        // Return the reservation if nothing was allocated meanwhile.
+        if self.arena.ptr.get().as_ptr() as usize == self.start.as_ptr() as usize + self.cap {
+            self.arena.ptr.set(self.start);
+        }
     }
 }
 
