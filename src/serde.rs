@@ -69,9 +69,16 @@ use crate::{Arena, Document, Item, Key, Span};
 /// occurred.
 ///
 /// The message follows serde's conventions (`missing field `x``,
-/// `unknown field `x`, expected ...`, `invalid type: ...`). Messages built
-/// by serde for invalid types or values may quote the offending value;
-/// use [`span`](Self::span) to locate the error without echoing source text.
+/// `unknown field `x`, expected ...`, `invalid type: string, expected u16`)
+/// but never contains a value from the document: invalid types and values
+/// are described by kind only (`string`, `integer`, ...), and an unknown
+/// enum variant is not quoted, because values may be secrets. Unknown and
+/// missing field names (table keys and field names of the target type)
+/// are included. Use [`span`](Self::span) to locate the offending value.
+///
+/// A message passed to [`serde::de::Error::custom`] by a `Deserialize`
+/// implementation (for example a `deserialize_with` function) is kept as
+/// written; this crate cannot redact what such code chooses to include.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Error {
     message: Box<str>,
@@ -129,6 +136,86 @@ impl de::Error for Error {
         Error {
             message: msg.to_string().into(),
             span: None,
+        }
+    }
+
+    // serde's defaults for the following quote the offending input
+    // (`invalid type: string "hunter2"`, ``unknown variant `sk_live_x` ``).
+    // These overrides describe it by kind only.
+
+    fn invalid_type(unexp: Unexpected<'_>, exp: &dyn de::Expected) -> Self {
+        de::Error::custom(format_args!(
+            "invalid type: {}, expected {exp}",
+            unexpected_kind(&unexp)
+        ))
+    }
+
+    fn invalid_value(unexp: Unexpected<'_>, exp: &dyn de::Expected) -> Self {
+        de::Error::custom(format_args!(
+            "invalid value: {}, expected {exp}",
+            unexpected_kind(&unexp)
+        ))
+    }
+
+    fn unknown_variant(_variant: &str, expected: &'static [&'static str]) -> Self {
+        if expected.is_empty() {
+            de::Error::custom("unknown variant, there are no variants")
+        } else {
+            de::Error::custom(format_args!(
+                "unknown variant, expected {}",
+                OneOf(expected)
+            ))
+        }
+    }
+}
+
+/// Describes an [`Unexpected`] by kind, without its value.
+fn unexpected_kind(unexp: &Unexpected<'_>) -> &'static str {
+    match unexp {
+        Unexpected::Bool(_) => "boolean",
+        Unexpected::Unsigned(_) | Unexpected::Signed(_) => "integer",
+        Unexpected::Float(_) => "float",
+        Unexpected::Char(_) => "character",
+        Unexpected::Str(_) => "string",
+        Unexpected::Bytes(_) => "byte array",
+        Unexpected::Unit => "unit value",
+        Unexpected::Option => "Option value",
+        Unexpected::NewtypeStruct => "newtype struct",
+        Unexpected::Seq => "sequence",
+        Unexpected::Map => "map",
+        Unexpected::Enum => "enum",
+        Unexpected::UnitVariant => "unit variant",
+        Unexpected::NewtypeVariant => "newtype variant",
+        Unexpected::TupleVariant => "tuple variant",
+        Unexpected::StructVariant => "struct variant",
+        // `Other` is free text; pass through only the descriptions this
+        // crate and serde use, never arbitrary text.
+        Unexpected::Other("integer") => "integer",
+        Unexpected::Other("datetime") => "datetime",
+        Unexpected::Other(_) => "value",
+    }
+}
+
+/// Formats a list of expected names as serde does: "`a`", "`a` or `b`",
+/// "one of `a`, `b`, `c`".
+struct OneOf(&'static [&'static str]);
+
+impl fmt::Display for OneOf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            [] => Ok(()),
+            [a] => write!(f, "`{a}`"),
+            [a, b] => write!(f, "`{a}` or `{b}`"),
+            names => {
+                f.write_str("one of ")?;
+                for (i, name) in names.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "`{name}`")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -257,7 +344,15 @@ impl<'de> Deserializer<'de> for ItemDeserializer<'_, 'de> {
                 } else if let Ok(v) = u64::try_from(v) {
                     visitor.visit_u64(v)
                 } else {
-                    visitor.visit_i128(v)
+                    // Only reachable when the target did not ask for an
+                    // i128/u128 directly (see `deserialize_i128`): a
+                    // self-describing visitor, or serde's buffered content
+                    // for `flatten`, untagged and internally tagged enums,
+                    // which cannot hold 128-bit integers.
+                    Err(de::Error::custom(
+                        "integer out of 64-bit range is not supported here; \
+                         only an i128 or u128 field can hold it",
+                    ))
                 }
             }
             Value::Float(f) => visitor.visit_f64(*f),
@@ -346,8 +441,28 @@ impl<'de> Deserializer<'de> for ItemDeserializer<'_, 'de> {
         visitor.visit_unit()
     }
 
+    fn deserialize_i128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.item.value() {
+            Value::Integer(i) => visitor
+                .visit_i128(i.as_i128())
+                .map_err(|e: Error| e.at(self.item.span())),
+            _ => self.deserialize_any(visitor),
+        }
+    }
+
+    fn deserialize_u128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+        match self.item.value() {
+            Value::Integer(i) => match u128::try_from(i.as_i128()) {
+                Ok(v) => visitor.visit_u128(v),
+                Err(_) => visitor.visit_i128(i.as_i128()),
+            }
+            .map_err(|e: Error| e.at(self.item.span())),
+            _ => self.deserialize_any(visitor),
+        }
+    }
+
     forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string
         bytes byte_buf seq tuple tuple_struct map struct identifier
     }
 }

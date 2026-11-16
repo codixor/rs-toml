@@ -29,6 +29,16 @@
 - `rs_toml::serde::ItemDeserializer` returns an error instead of
   recursing past the same limit, which guards trees built or edited
   through the mutable API.
+- `rs_toml::serde::Error` messages never contain values from the document:
+  invalid types and values are described by kind (`invalid type: string,
+  expected u16`) and unknown enum variants are not quoted (`unknown
+  variant, expected `a` or `b``), because values may be secrets. Unknown
+  field names (table keys) are still quoted. Messages passed to
+  `Error::custom` by user `Deserialize` code are kept as written.
+- Integers beyond the 64-bit range deserialize into `i128`/`u128` fields;
+  where serde buffers input (`flatten`, untagged and internally tagged
+  enums, self-describing visitors) they fail with "integer out of 64-bit
+  range is not supported here" instead of a confusing type error.
 
 ## 0.1.1 — 2026-11-15
 

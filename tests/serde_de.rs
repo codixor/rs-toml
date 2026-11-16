@@ -258,7 +258,8 @@ fn internally_tagged_file_variant() {
 fn internally_tagged_unknown_variant_points_at_table() {
     let src = "listen = 'x'\n[storage]\ntype = 's3'\npath = '/d'\n";
     let e = err::<Config>(src);
-    assert!(e.message().starts_with("unknown variant `s3`"), "{e}");
+    assert!(e.message().starts_with("unknown variant, expected"), "{e}");
+    assert!(!e.message().contains("s3"), "{e}");
     assert_eq!(spanned(src, &e), "'s3'");
 }
 
@@ -336,7 +337,8 @@ fn syntax_error_has_span() {
 fn unknown_unit_variant_points_at_value() {
     let src = "listen = 'x'\n[[outbound]]\nurl = 'a'\nuse = ['jwt', 'smtp']\n";
     let e = err::<Config>(src);
-    assert!(e.message().starts_with("unknown variant `smtp`"), "{e}");
+    assert!(e.message().starts_with("unknown variant, expected"), "{e}");
+    assert!(!e.message().contains("smtp"), "{e}");
     assert_eq!(spanned(src, &e), "'smtp'");
 }
 
@@ -502,7 +504,8 @@ fn enums_unit_external_newtype_tuple_struct() {
     assert!(err::<H>(src).span().is_some());
     let src = "e = [{ bogus = 1 }]";
     let e = err::<H>(src);
-    assert!(e.message().starts_with("unknown variant `bogus`"), "{e}");
+    assert!(e.message().starts_with("unknown variant, expected"), "{e}");
+    assert!(!e.message().contains("bogus"), "{e}");
     assert_eq!(spanned(src, &e), "bogus");
 }
 
