@@ -1,0 +1,35 @@
+# Seed covering most TOML 1.1 syntax.
+title = "seed"
+"quoted key" = 'literal'
+dotted.key.path = 1_000
+hex = 0xDEAD_beef
+oct = 0o755
+bin = 0b1101
+float = -3.14e+2
+special = [inf, -inf, nan]
+bool = true
+odt = 1979-05-27T07:32:00.999999-07:00
+ldt = 1979-05-27T07:32:00
+ld = 1979-05-27
+lt = 07:32
+multi = """
+line é \x41 \
+  continued"""
+raw = '''
+raw\n'''
+inline = { a = 1, b = [1, "two", { c = 3.0 }], }
+nested = [[1, 2], ["a"], []]
+
+[table]
+key = "value"
+
+[table.sub]
+empty = {}
+
+[[aot]]
+name = "first"
+
+[[aot]]
+name = "second"
+[aot.child]
+x = 1

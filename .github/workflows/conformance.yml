@@ -1,0 +1,37 @@
+name: Conformance
+
+# Runs the official toml-lang/toml-test suite (pinned in scripts/toml-test.sh)
+# against rs-toml via diver/toml-test-harness, for TOML 1.1 and 1.0.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  toml-test:
+    # GitHub-hosted runner; this public repo must not use self-hosted runners.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: diver/toml-test-harness -> ../../target/toml-test-harness
+      - name: Run toml-test
+        run: bash scripts/toml-test.sh
