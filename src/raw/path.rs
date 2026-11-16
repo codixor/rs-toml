@@ -43,8 +43,16 @@ impl MaybeTomlPath {
             }
         }
 
-        let comp_size = len * std::mem::size_of::<PathComponent<'static>>();
-        let size = comp_size + total_string_bytes;
+        let comp_size = len
+            .checked_mul(std::mem::size_of::<PathComponent<'static>>())
+            .expect("error path too large");
+        let size = comp_size
+            .checked_add(total_string_bytes)
+            .expect("error path too large");
+        // `len` and `size` are stored as u32 and `Drop` rebuilds the layout
+        // from `size`, so they must round-trip exactly.
+        let len32 = u32::try_from(len).expect("error path too large");
+        let size32 = u32::try_from(size).expect("error path too large");
 
         // SAFETY: size > 0 because len >= 1 and size_of::<PathComponent>() > 0.
         let layout = std::alloc::Layout::from_size_align(
@@ -100,8 +108,8 @@ impl MaybeTomlPath {
         MaybeTomlPath {
             // SAFETY: raw was checked non-null above
             ptr: unsafe { NonNull::new_unchecked(base) },
-            len: len as u32,
-            size: size as u32,
+            len: len32,
+            size: size32,
         }
     }
     /// Records the address of `item` so the path can be computed later by
