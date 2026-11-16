@@ -8,16 +8,8 @@ use crate::Error;
 use self::RenameRule::*;
 use std::fmt::{self, Debug, Display};
 
-fn underscores_to_hyphens(mut s: String) -> String {
-    // SAFETY: replacing '_' (0x5F) with '-' (0x2D) preserves valid UTF-8
-    unsafe {
-        for b in s.as_bytes_mut() {
-            if *b == b'_' {
-                *b = b'-';
-            }
-        }
-    }
-    s
+fn underscores_to_hyphens(s: String) -> String {
+    s.replace('_', "-")
 }
 
 /// The different possible ways to change case of fields in a struct, or variants in an enum.

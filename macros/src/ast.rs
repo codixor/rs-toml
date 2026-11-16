@@ -1169,7 +1169,7 @@ fn parse_inner_enum_variants<'a>(
             attr: if let Some(attr) = next_attr.take() {
                 attr
             } else {
-                &DEFAULT_ATTR.0
+                attr_buffer.alloc_default()
             },
             kind,
             rename_all: std::mem::replace(&mut next_rename_all, RenameRule::None),
@@ -1267,21 +1267,11 @@ pub fn parse_tuple_fields<'a>(
             attr: if let Some(attr) = next_attr.take() {
                 attr
             } else {
-                &DEFAULT_ATTR.0
+                attr_buf.alloc_default()
             },
         })
     }
 }
-struct DefaultFieldAttr(FieldAttrs);
-// SAFETY: the only instance is `DEFAULT_ATTR`, a const-initialised empty
-// value that is never mutated, so sharing `&DefaultFieldAttr` is read-only.
-unsafe impl Sync for DefaultFieldAttr {}
-static DEFAULT_ATTR: DefaultFieldAttr = const {
-    DefaultFieldAttr(FieldAttrs {
-        attrs: Vec::new(),
-        flags: 0,
-    })
-};
 pub fn parse_struct_fields<'a>(
     output: &mut Vec<Field<'a>>,
     fields: &'a [TokenTree],
@@ -1343,7 +1333,7 @@ pub fn parse_struct_fields<'a>(
             attr: if let Some(attr) = next_attr.take() {
                 attr
             } else {
-                &DEFAULT_ATTR.0
+                attr_buf.alloc_default()
             },
         })
     }

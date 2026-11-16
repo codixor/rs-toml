@@ -7,5 +7,7 @@
 
 pub(crate) mod arena;
 pub(crate) mod item;
+pub(crate) mod path;
+pub(crate) mod shallow;
 pub(crate) mod text;
 pub(crate) mod vec;

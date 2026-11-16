@@ -1,6 +1,6 @@
 #![allow(elided_lifetimes_in_paths)]
 #![allow(dead_code)]
-#![allow(unsafe_code)]
+#![forbid(unsafe_code)]
 #![allow(clippy::all)]
 #![allow(clippy::pedantic)]
 #![allow(clippy::manual_find)]
@@ -26,9 +26,14 @@ struct InnerError {
 #[derive(Debug)]
 pub(crate) struct Error(InnerError);
 
-// SAFETY: proc-macro spans are `!Send`, but proc macros run on one thread and
-// an `Error` never leaves the expansion that created it.
-unsafe impl Send for Error {}
+/// Panic payload for [`Error::throw`]. `Span` is `!Send`, so the span travels
+/// through a thread-local slot (proc macros expand on one thread) and only
+/// the message goes into the `Send` panic payload.
+struct Thrown(String);
+
+thread_local! {
+    static THROWN_SPAN: std::cell::Cell<Option<Span>> = const { std::cell::Cell::new(None) };
+}
 impl Error {
     pub(crate) fn to_compiler_error(&self, wrap: bool) -> TokenStream {
         let mut toks: Vec<TokenTree> = Vec::new();
@@ -73,8 +78,13 @@ impl Error {
         match std::panic::catch_unwind(move || func(ts)) {
             Ok(e) => e,
             Err(err) => {
-                if let Some(value) = err.downcast_ref::<Error>() {
-                    value.to_compiler_error(false)
+                if let Some(Thrown(message)) = err.downcast_ref::<Thrown>() {
+                    let span = THROWN_SPAN.with(|slot| slot.take()).unwrap_or_else(Span::call_site);
+                    Error(InnerError {
+                        span,
+                        message: message.clone(),
+                    })
+                    .to_compiler_error(false)
                 } else {
                     Error::from_ctx().to_compiler_error(false)
                 }
@@ -88,7 +98,9 @@ impl Error {
         })
     }
     pub fn throw(self) -> ! {
-        std::panic::panic_any(self);
+        let Error(InnerError { span, message }) = self;
+        THROWN_SPAN.with(|slot| slot.set(Some(span)));
+        std::panic::panic_any(Thrown(message));
     }
     pub(crate) fn msg(message: &str) -> ! {
         Error(InnerError {
