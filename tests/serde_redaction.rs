@@ -150,6 +150,13 @@ fn wide_integers_reach_i128_and_u128_fields() {
 #[test]
 fn wide_integer_in_buffered_content_is_a_clear_error() {
     #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    #[allow(dead_code)]
+    enum U {
+        Int(i64),
+        Text(String),
+    }
+    #[derive(Debug, Deserialize)]
     #[allow(dead_code)]
     struct Outer {
         #[serde(flatten)]
@@ -164,13 +171,6 @@ fn wide_integer_in_buffered_content_is_a_clear_error() {
     );
     assert_eq!(&src[e.span().unwrap()], "18446744073709551616");
 
-    #[derive(Debug, Deserialize)]
-    #[serde(untagged)]
-    #[allow(dead_code)]
-    enum U {
-        Int(i64),
-        Text(String),
-    }
     // Untagged enums buffer their input, which cannot hold a value beyond
     // 64 bits; the error says why instead of "did not match any variant".
     let e =
