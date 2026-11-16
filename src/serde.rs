@@ -177,16 +177,47 @@ pub fn from_item<'de, T: de::Deserialize<'de>>(item: &Item<'de>) -> Result<T, Er
     T::deserialize(ItemDeserializer::new(item))
 }
 
+/// Deepest container nesting [`ItemDeserializer`] descends into. Parsed
+/// documents never exceed it (the parser enforces the same limit); it
+/// guards trees built or modified through the mutable API.
+const MAX_DEPTH: u16 = crate::parser::MAX_RECURSION_DEPTH.unsigned_abs();
+
 /// A [`serde::Deserializer`] over a parsed [`Item`].
+///
+/// Descending into containers nested deeper than the parser's nesting
+/// limit returns an [`Error`] instead of recursing further.
 #[derive(Clone, Copy)]
 pub struct ItemDeserializer<'a, 'de> {
     item: &'a Item<'de>,
+    /// Nesting depth of `item`; the item passed to [`new`](Self::new) is 0.
+    depth: u16,
 }
 
 impl<'a, 'de> ItemDeserializer<'a, 'de> {
     /// Creates a deserializer for `item`.
     pub fn new(item: &'a Item<'de>) -> Self {
-        Self { item }
+        Self { item, depth: 0 }
+    }
+
+    /// A deserializer for `item`, a direct child of the current container.
+    fn child<'b>(&self, item: &'b Item<'de>) -> ItemDeserializer<'b, 'de> {
+        ItemDeserializer {
+            item,
+            depth: self.depth.saturating_add(1),
+        }
+    }
+
+    /// Fails if this container is nested deeper than [`MAX_DEPTH`].
+    fn check_depth(&self) -> Result<(), Error> {
+        if self.depth > MAX_DEPTH {
+            Err(Error {
+                message: "max recursion depth exceeded".into(),
+                span: None,
+            }
+            .at(self.item.span()))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -236,16 +267,22 @@ impl<'de> Deserializer<'de> for ItemDeserializer<'_, 'de> {
                 visitor.visit_str(dt.format(&mut buf))
             }
             Value::Array(array) => {
+                self.check_depth()?;
                 let mut seq = SeqDeserializer {
                     iter: array.as_slice().iter(),
                     count: 0,
+                    parent: self,
                 };
                 visitor.visit_seq(&mut seq).and_then(|value| seq.end(value))
             }
-            Value::Table(table) => visitor.visit_map(MapDeserializer {
-                iter: table.entries().iter(),
-                value: None,
-            }),
+            Value::Table(table) => {
+                self.check_depth()?;
+                visitor.visit_map(MapDeserializer {
+                    iter: table.entries().iter(),
+                    value: None,
+                    parent: self,
+                })
+            }
         };
         result.map_err(|e| e.at(span))
     }
@@ -290,8 +327,12 @@ impl<'de> Deserializer<'de> for ItemDeserializer<'_, 'de> {
         let result = match self.item.value() {
             Value::String(s) => visitor.visit_enum(BorrowedStrDeserializer::new(*s)),
             Value::Table(table) if table.len() == 1 => {
+                self.check_depth()?;
                 let (key, value) = &table.entries()[0];
-                visitor.visit_enum(EnumDeserializer { key, value })
+                visitor.visit_enum(EnumDeserializer {
+                    key,
+                    value: self.child(value),
+                })
             }
             _ => Err(de::Error::invalid_type(
                 unexpected(self.item),
@@ -314,6 +355,8 @@ impl<'de> Deserializer<'de> for ItemDeserializer<'_, 'de> {
 struct SeqDeserializer<'a, 'de> {
     iter: std::slice::Iter<'a, Item<'de>>,
     count: usize,
+    /// The array being read.
+    parent: ItemDeserializer<'a, 'de>,
 }
 
 impl SeqDeserializer<'_, '_> {
@@ -355,7 +398,7 @@ impl<'de> SeqAccess<'de> for SeqDeserializer<'_, 'de> {
             return Ok(None);
         };
         self.count += 1;
-        seed.deserialize(ItemDeserializer::new(item))
+        seed.deserialize(self.parent.child(item))
             .map(Some)
             .map_err(|e| e.at(item.span()))
     }
@@ -368,6 +411,8 @@ impl<'de> SeqAccess<'de> for SeqDeserializer<'_, 'de> {
 struct MapDeserializer<'a, 'de> {
     iter: std::slice::Iter<'a, (Key<'de>, Item<'de>)>,
     value: Option<&'a Item<'de>>,
+    /// The table being read.
+    parent: ItemDeserializer<'a, 'de>,
 }
 
 impl<'de> MapAccess<'de> for MapDeserializer<'_, 'de> {
@@ -388,7 +433,7 @@ impl<'de> MapAccess<'de> for MapDeserializer<'_, 'de> {
         let Some(item) = self.value.take() else {
             return Err(de::Error::custom("value requested before its key"));
         };
-        seed.deserialize(ItemDeserializer::new(item))
+        seed.deserialize(self.parent.child(item))
             .map_err(|e| e.at(item.span()))
     }
 
@@ -446,7 +491,7 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'de> {
 /// An externally tagged enum: a table with one key naming the variant.
 struct EnumDeserializer<'a, 'de> {
     key: &'a Key<'de>,
-    value: &'a Item<'de>,
+    value: ItemDeserializer<'a, 'de>,
 }
 
 impl<'a, 'de> EnumAccess<'de> for EnumDeserializer<'a, 'de> {
@@ -463,28 +508,29 @@ impl<'a, 'de> EnumAccess<'de> for EnumDeserializer<'a, 'de> {
 }
 
 struct VariantDeserializer<'a, 'de> {
-    value: &'a Item<'de>,
+    value: ItemDeserializer<'a, 'de>,
 }
 
 impl<'de> VariantAccess<'de> for VariantDeserializer<'_, 'de> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<(), Error> {
-        if is_empty_table(self.value) {
+        let item = self.value.item;
+        if is_empty_table(item) {
             Ok(())
         } else {
-            let error: Error = de::Error::invalid_type(unexpected(self.value), &"an empty table");
-            Err(error.at(self.value.span()))
+            let error: Error = de::Error::invalid_type(unexpected(item), &"an empty table");
+            Err(error.at(item.span()))
         }
     }
 
     fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, Error> {
-        seed.deserialize(ItemDeserializer::new(self.value))
-            .map_err(|e| e.at(self.value.span()))
+        let span = self.value.item.span();
+        seed.deserialize(self.value).map_err(|e| e.at(span))
     }
 
     fn tuple_variant<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value, Error> {
-        ItemDeserializer::new(self.value).deserialize_seq(visitor)
+        self.value.deserialize_seq(visitor)
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -492,6 +538,6 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'_, 'de> {
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Error> {
-        ItemDeserializer::new(self.value).deserialize_map(visitor)
+        self.value.deserialize_map(visitor)
     }
 }

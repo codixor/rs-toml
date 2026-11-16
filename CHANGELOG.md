@@ -11,6 +11,25 @@
   `deserialize_with`. Integers are range checked, never wrapped; datetimes
   deserialize as strings.
 
+### Fixed
+- The nesting limit is now one cumulative budget for the whole tree.
+  Previously table headers, dotted keys and inline values each had their
+  own 256-level allowance, so `[[a.a...]]` headers combined with dotted
+  keys and nested arrays could build a tree several hundred levels deep
+  and overflow the stack in later recursive walks (contrary to the 0.1.1
+  note). Every container now counts toward a single limit, measured from
+  the root, and an array of tables counts as two levels (the array and its
+  entry).
+
+### Changed
+- The nesting limit is lowered from 256 to 128 levels, so emit, `Debug`,
+  `Clone`, `FromToml` and serde (including untagged recursive enums) walk
+  any parsed tree within a 512 KiB stack in a debug build. Deeper input
+  fails with "Max recursion depth exceeded" and a span.
+- `rs_toml::serde::ItemDeserializer` returns an error instead of
+  recursing past the same limit, which guards trees built or edited
+  through the mutable API.
+
 ## 0.1.1 — 2026-11-15
 
 ### Fixed
