@@ -16,7 +16,7 @@ use crate::{DateTime, Span, Table};
 use std::fmt;
 
 pub(crate) use crate::raw::item::NONE;
-pub use crate::raw::item::{Item, ItemMetadata, MaybeItem};
+pub use crate::raw::item::{Item, MaybeItem};
 pub use array::Array;
 pub(crate) use array::InternalArray;
 pub(crate) use table::InnerTable;
