@@ -127,8 +127,11 @@ impl Arena {
     ///
     /// # Safety
     ///
-    /// - `ptr` must have been returned by a prior `alloc` on this arena whose
-    ///   size was `old_size`.
+    /// - `ptr` must be valid for reads of `old_size` bytes for as long as
+    ///   the arena lives (an allocation from this or another live arena).
+    ///   The in-place path is only taken when `ptr..ptr + old_size` ends at
+    ///   this arena's bump pointer inside its current slab, i.e. it was the
+    ///   last allocation made from this arena.
     /// - `new_size` must be `>= old_size`. Violating this causes wrapping
     ///   underflow in the in place growth path or an out of bounds copy.
     pub(crate) unsafe fn realloc(
@@ -143,8 +146,11 @@ impl Arena {
         // out-of-bounds pointers and to preserve strict provenance.
         let old_end = ptr.as_ptr() as usize + old_size;
         let head = self.ptr.get().as_ptr() as usize;
+        // The in-place path also requires `ptr` to lie in the current slab,
+        // so a buffer that came from another arena is always copied.
+        let slab_data = self.slab.get().as_ptr() as usize + HEADER_SIZE;
 
-        if old_end == head {
+        if old_end == head && ptr.as_ptr() as usize >= slab_data {
             // Compare as new_size <= end - ptr instead of ptr + new_size <= end
             // to avoid wrapping overflow when new_size is very large.
             let remaining = self.end.get().as_ptr() as usize - ptr.as_ptr() as usize;
@@ -546,7 +552,7 @@ impl Drop for Scratch<'_> {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/arena.rs"]
+#[path = "../../tests/unit/arena.rs"]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "tests call the unsafe arena API directly to exercise its contract"

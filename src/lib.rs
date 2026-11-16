@@ -181,7 +181,7 @@
 //!
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(clippy::undocumented_unsafe_blocks)]
-mod arena;
+use raw::arena;
 mod de;
 mod emit;
 mod error;

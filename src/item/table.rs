@@ -8,8 +8,7 @@ use crate::item::{
     TAG_TABLE, TableStyle,
 };
 use crate::parser::KeyRef;
-use std::mem::size_of;
-use std::ptr::NonNull;
+use crate::raw::vec::ArenaVec;
 
 use crate::arena::Arena;
 
@@ -17,66 +16,43 @@ pub(crate) type TableIndex<'de> = foldhash::HashMap<KeyRef<'de>, usize>;
 
 type TableEntry<'de> = (Key<'de>, Item<'de>);
 
-const MIN_CAP: u32 = 2;
-
 /// A TOML table: a flat list of key-value pairs with linear lookup.
-#[repr(C, align(8))]
-pub(crate) struct InnerTable<'de> {
-    pub(super) len: u32,
-    pub(super) cap: u32,
-    pub(super) ptr: NonNull<TableEntry<'de>>,
-}
+#[repr(transparent)]
+#[derive(Default)]
+pub(crate) struct InnerTable<'de>(ArenaVec<'de, TableEntry<'de>>);
 
 impl<'de> InnerTable<'de> {
     /// Creates an empty table.
     #[inline]
     pub fn new() -> Self {
-        Self {
-            len: 0,
-            cap: 0,
-            ptr: NonNull::dangling(),
-        }
+        Self(ArenaVec::new())
     }
 
     pub(crate) fn with_capacity(cap: u32, arena: &'de Arena) -> Self {
-        let mut table = Self::new();
-        if cap > 0 {
-            table.grow_to(cap, arena);
-        }
-        table
+        Self(ArenaVec::with_capacity(cap, arena))
     }
 
     /// Inserts a key-value pair. Does **not** check for duplicates.
+    #[inline]
     pub fn insert_unique(
         &mut self,
         key: Key<'de>,
         item: Item<'de>,
         arena: &'de Arena,
     ) -> &mut TableEntry<'de> {
-        let len = self.len;
-        if self.len == self.cap {
-            self.grow(arena);
-        }
-        // SAFETY: grow() ensures len < cap, so ptr.add(len) is within the
-        // allocation. The write targets uninitialized memory past the current length.
-        unsafe {
-            let ptr = self.ptr.as_ptr().add(len as usize);
-            ptr.write((key, item));
-            self.len = len + 1;
-            &mut (*ptr)
-        }
+        self.0.push((key, item), arena)
     }
 
     /// Returns the number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.len as usize
+        self.0.len()
     }
 
     /// Returns `true` if the table has no entries.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.0.is_empty()
     }
     /// Looks up a key using the parser's hash index when the table is large
     /// enough, falling back to a linear scan for small tables.
@@ -176,16 +152,12 @@ impl<'de> InnerTable<'de> {
     /// Returns a slice of all entries.
     #[inline]
     pub fn entries(&self) -> &[TableEntry<'de>] {
-        // SAFETY: ptr points to arena-allocated memory with at least len
-        // initialized entries. When len == 0, ptr is NonNull::dangling() which
-        // satisfies from_raw_parts' alignment requirement for zero-length slices.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize) }
+        self.0.as_slice()
     }
 
     #[inline]
     pub fn entries_mut(&mut self) -> &mut [TableEntry<'de>] {
-        // SAFETY: same as entries() — ptr is valid for len initialized entries.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len as usize) }
+        self.0.as_mut_slice()
     }
 
     pub(crate) fn find_index(&self, name: &str) -> Option<usize> {
@@ -199,107 +171,19 @@ impl<'de> InnerTable<'de> {
 
     /// Remove entry at `idx` by swapping it with the last entry.
     fn remove_at(&mut self, idx: usize) -> (Key<'de>, Item<'de>) {
-        let last = self.len as usize - 1;
-        // SAFETY: idx was returned by find_index, so idx < len and the
-        // pointer is within initialized entries. read() moves the value out.
-        let ptr = unsafe { self.ptr.as_ptr().add(idx) };
-        // SAFETY: `ptr` is an initialized entry (see above); the slot is
-        // either overwritten below or dropped from the live range by
-        // `len -= 1`, so the value is not duplicated.
-        let entry = unsafe { ptr.read() };
-        if idx != last {
-            // Safety: `last` is a valid, initialized index distinct from `idx`.
-            unsafe {
-                ptr.write(self.ptr.as_ptr().add(last).read());
-            }
-        }
-        self.len -= 1;
-        entry
-    }
-
-    #[cold]
-    fn grow(&mut self, arena: &'de Arena) {
-        let new_cap = if self.cap == 0 {
-            MIN_CAP
-        } else {
-            self.cap.checked_mul(2).expect("capacity overflow")
-        };
-        self.grow_to(new_cap, arena);
-    }
-
-    fn grow_to(&mut self, new_cap: u32, arena: &'de Arena) {
-        // On 64-bit, u32 * size_of::<TableEntry>() cannot overflow usize.
-        #[cfg(target_pointer_width = "32")]
-        let new_size = (new_cap as usize)
-            .checked_mul(size_of::<TableEntry<'_>>())
-            .expect("capacity overflow");
-        #[cfg(not(target_pointer_width = "32"))]
-        let new_size = new_cap as usize * size_of::<TableEntry<'_>>();
-        if self.cap > 0 {
-            let old_size = self.cap as usize * size_of::<TableEntry<'_>>();
-            // Safety: ptr was returned by a prior arena alloc of old_size bytes.
-            self.ptr = unsafe { arena.realloc(self.ptr.cast(), old_size, new_size).cast() };
-        } else {
-            self.ptr = arena.alloc(new_size).cast();
-        }
-        self.cap = new_cap;
+        self.0.swap_remove(idx)
     }
 
     /// Deep-clones this table into `arena`. Keys and strings are shared
     /// with the source.
     pub(crate) fn clone_in(&self, arena: &'de Arena) -> Self {
-        let len = self.len as usize;
-        if len == 0 {
+        if self.is_empty() {
             return Self::new();
         }
-        let size = len * size_of::<TableEntry<'de>>();
-        let dst: NonNull<TableEntry<'de>> = arena.alloc(size).cast();
-        let src = self.ptr.as_ptr();
-        let dst_ptr = dst.as_ptr();
-
-        let mut run_start = 0;
-        for i in 0..len {
-            // SAFETY: i < len, so src.add(i) is within initialized entries.
-            if unsafe { !(*src.add(i)).1.is_scalar() } {
-                if run_start < i {
-                    // SAFETY: entries[run_start..i] have scalar values — Key is
-                    // Copy, scalar Items are bitwise-copyable. Source and
-                    // destination are disjoint arena regions.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            src.add(run_start),
-                            dst_ptr.add(run_start),
-                            i - run_start,
-                        );
-                    }
-                }
-                // SAFETY: the entry's value is an aggregate; deep-clone it.
-                // Key is Copy.
-                unsafe {
-                    let (key, item) = &*src.add(i);
-                    dst_ptr.add(i).write((*key, item.clone_in(arena)));
-                }
-                run_start = i + 1;
-            }
-        }
-        if run_start < len {
-            // SAFETY: entries[run_start..len] have scalar values (the loop
-            // above deep cloned every aggregate) and Key is Copy, so a
-            // bitwise copy is correct; dst is a fresh, disjoint allocation.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    src.add(run_start),
-                    dst_ptr.add(run_start),
-                    len - run_start,
-                );
-            }
-        }
-
-        Self {
-            len: self.len,
-            cap: self.len,
-            ptr: dst,
-        }
+        Self(
+            self.0
+                .map_in(arena, |(key, item)| (*key, item.clone_in(arena))),
+        )
     }
 }
 
@@ -314,29 +198,18 @@ impl std::fmt::Debug for InnerTable<'_> {
 }
 
 /// Consuming iterator over a [`Table`], yielding `(`[`Key`]`, `[`Item`]`)` pairs.
-pub struct IntoIter<'de> {
-    table: InnerTable<'de>,
-    index: u32,
-}
+pub struct IntoIter<'de>(crate::raw::vec::IntoIter<'de, TableEntry<'de>>);
 
 impl<'de> Iterator for IntoIter<'de> {
     type Item = (Key<'de>, Item<'de>);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.table.len {
-            // SAFETY: index < len is checked above, so the read is within
-            // bounds of initialized entries.
-            let entry = unsafe { self.table.ptr.as_ptr().add(self.index as usize).read() };
-            self.index += 1;
-            Some(entry)
-        } else {
-            None
-        }
+        self.0.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = (self.table.len - self.index) as usize;
-        (remaining, Some(remaining))
+        self.0.size_hint()
     }
 }
 
@@ -574,10 +447,7 @@ impl<'de> IntoIterator for Table<'de> {
     type IntoIter = IntoIter<'de>;
 
     fn into_iter(self) -> Self::IntoIter {
-        IntoIter {
-            table: self.value,
-            index: 0,
-        }
+        IntoIter(self.value.0.into_iter())
     }
 }
 

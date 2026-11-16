@@ -5,4 +5,6 @@
 //! `#![deny(unsafe_code)]` and `scripts/check-unsafe.sh` rejects `unsafe`
 //! anywhere else.
 
+pub(crate) mod arena;
 pub(crate) mod text;
+pub(crate) mod vec;
