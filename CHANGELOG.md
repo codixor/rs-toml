@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-11-16
 
 ### Added
 - serde `Deserialize` support behind the `serde` feature: `rs_toml::serde`
