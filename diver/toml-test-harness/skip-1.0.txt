@@ -1,0 +1,16 @@
+# toml-test tests skipped for `-toml=1.0` runs. One test per line, followed by
+# `#` and the reason. scripts/toml-test.sh passes them with -skip-must-err, so
+# a listed test that starts passing fails the run and must be removed here.
+#
+# rs-toml implements TOML 1.1 only (src/lib.rs: "full compliance with the TOML
+# 1.1 spec"). TOML 1.1 deliberately accepts these inputs, which 1.0 rejects;
+# there is no 1.0 strict mode, so they are intentional divergences.
+invalid/datetime/no-secs                # 1.1: seconds optional in times (1987-07-05T17:45Z)
+invalid/local-datetime/no-secs          # 1.1: seconds optional in times (1987-07-05T17:45)
+invalid/local-time/no-secs              # 1.1: seconds optional in times (17:45)
+invalid/inline-table/linebreak-01       # 1.1: newlines allowed inside inline tables
+invalid/inline-table/linebreak-02       # 1.1: newlines allowed inside inline tables
+invalid/inline-table/linebreak-03       # 1.1: newlines allowed inside inline tables
+invalid/inline-table/linebreak-04       # 1.1: newlines allowed inside inline tables
+invalid/inline-table/trailing-comma     # 1.1: trailing comma allowed in inline tables
+invalid/string/basic-byte-escapes       # 1.1: \xHH escape allowed in basic strings

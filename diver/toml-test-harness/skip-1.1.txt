@@ -1,0 +1,2 @@
+# toml-test tests skipped for `-toml=1.1` runs (format: see skip-1.0.txt).
+# Empty: rs-toml passes the whole TOML 1.1 suite of toml-test v2.2.0.
