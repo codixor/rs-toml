@@ -128,6 +128,9 @@ impl MaybeTomlPath {
         }
 
         let base = raw.cast::<PathComponent<'static>>();
+        // SAFETY: `raw` is an allocation of `size = comp_size +
+        // total_string_bytes` bytes, so `raw + comp_size` is in bounds (or
+        // one past the end when there are no key bytes).
         let mut string_cursor = unsafe { raw.add(comp_size) };
 
         for (i, comp) in components.iter().enumerate() {
@@ -146,6 +149,9 @@ impl MaybeTomlPath {
                             name_len,
                         ))
                     };
+                    // SAFETY: the trailing region holds the sum of all key
+                    // lengths; advancing past this key stays in bounds (at
+                    // most one past the end after the last key).
                     string_cursor = unsafe { string_cursor.add(name_len) };
                     PathComponent::Key(Key {
                         name,
@@ -185,8 +191,7 @@ impl MaybeTomlPath {
     }
 
     /// The address recorded by [`uncomputed`](Self::uncomputed). Callers
-    /// must only compare it or offset it after checking it lies inside a
-    /// slice they hold; it is never valid to dereference on its own.
+    /// only compare its address; it must never be dereferenced.
     pub(crate) fn uncomputed_ptr(&self) -> *const () {
         self.ptr.as_ptr() as *const ()
     }
@@ -199,6 +204,8 @@ impl MaybeTomlPath {
         // the same allocation. The returned TomlPath borrows self, so the
         // inner 'static is shortened to 'a, preventing it from escaping.
         let slice = unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize) };
+        // SAFETY: `TomlPath` is `#[repr(transparent)]` over
+        // `[PathComponent]`, so the cast keeps layout and metadata (length).
         Some(unsafe { &*(slice as *const [PathComponent<'static>] as *const TomlPath<'a>) })
     }
 }
@@ -230,9 +237,8 @@ impl Drop for MaybeTomlPath {
 //   `Item` borrowed from a parsed tree. It is NOT owned and may dangle once
 //   the arena is gone. It is never dereferenced: `as_toml_path` and `Drop`
 //   ignore it (`has_path()` and `size > 0` are false), and the only reader,
-//   `uncomputed_ptr`, feeds address comparisons in `de::compute_paths` and
-//   `helper`, which do pointer arithmetic only after checking that the
-//   address lies inside a live slice they hold. An address carries no
+//   `uncomputed_ptr`, feeds plain address (`usize`) comparisons in
+//   `de::compute_paths` and `helper`. An address carries no
 //   thread affinity, so sending or sharing it cannot cause a data race.
 unsafe impl Send for MaybeTomlPath {}
 // SAFETY: see `Send` above; `&MaybeTomlPath` only allows reading the owned

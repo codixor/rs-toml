@@ -1,6 +1,10 @@
 #![allow(clippy::manual_map)]
 #[cfg(test)]
 #[path = "../tests/unit/value.rs"]
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "tests call unchecked accessors directly to exercise them"
+)]
 mod tests;
 
 pub(crate) mod array;

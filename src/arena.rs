@@ -104,6 +104,10 @@ impl Arena {
         if true {
             use std::mem::MaybeUninit;
 
+            // SAFETY: `result` points to `size` freshly reserved bytes of the
+            // current slab (both branches above guarantee it), so a
+            // `MaybeUninit<u8>` slice over them is valid; its pointer is
+            // non-null because `result` is.
             unsafe {
                 return NonNull::new_unchecked(
                     std::slice::from_raw_parts_mut(result.cast::<MaybeUninit<u8>>().as_ptr(), size)
@@ -145,9 +149,12 @@ impl Arena {
             // to avoid wrapping overflow when new_size is very large.
             let remaining = self.end.get().as_ptr() as usize - ptr.as_ptr() as usize;
             if new_size <= remaining {
-                // Safety: new_end is within the current slab. Advance the bump
-                // pointer by the growth delta, preserving provenance via add().
                 let extra = new_size - old_size;
+                // SAFETY: `old_end == head`, so this allocation is the last
+                // one in the current slab and `head + extra = ptr + new_size`
+                // stays within the slab (`new_size <= remaining`). Deriving
+                // from the bump pointer preserves provenance; `head - old_size
+                // = ptr` is in bounds of the same slab.
                 unsafe {
                     let head_ptr = self.ptr.get().as_ptr();
                     self.ptr.set(NonNull::new_unchecked(head_ptr.add(extra)));
@@ -287,8 +294,12 @@ impl Drop for Arena {
                 break;
             }
             let prev = header.prev;
-            // Safety: header.size and SLAB_ALIGN match the layout used in grow().
+            // SAFETY: header.size and SLAB_ALIGN are the values grow()
+            // validated with Layout::from_size_align for this slab.
             let slab_layout = unsafe { Layout::from_size_align_unchecked(header.size, SLAB_ALIGN) };
+            // SAFETY: `current` is a heap slab (size != 0, so not the static
+            // sentinel) allocated in grow() with exactly `slab_layout`, and
+            // it is freed once: we follow `prev` links, which form a list.
             unsafe {
                 std::alloc::dealloc(current.as_ptr().cast(), slab_layout);
             }
@@ -306,6 +317,16 @@ impl Drop for Arena {
 /// pointer. On [`commit`](Scratch::commit) the arena pointer is advanced past
 /// the committed bytes. If the scratch is dropped without committing, the arena
 /// pointer is unchanged and the space is reused by subsequent allocations.
+///
+/// # Invariant
+///
+/// While a `Scratch` is alive, nothing else may allocate from its arena
+/// (the contract of [`Arena::scratch`]): the bytes from `start` to the end
+/// of the slab belong to the scratch, but the arena's bump pointer still
+/// points at `start`, so an `alloc` would hand out the same bytes. Hence
+/// `arena.ptr == start` holds for the whole lifetime of the scratch
+/// (`grow_slow` moves both together), which `commit` and `grow_slow` check
+/// with `debug_assert`.
 pub(crate) struct Scratch<'a> {
     arena: &'a Arena,
     start: NonNull<u8>,
@@ -380,6 +401,11 @@ impl<'a> Scratch<'a> {
         if self.len == 0 {
             return &[];
         }
+        debug_assert_eq!(
+            self.arena.ptr.get(),
+            self.start,
+            "arena allocated while a Scratch was alive"
+        );
         // Safety: start..start+len is valid scratch memory within the arena.
         let slice = unsafe { std::slice::from_raw_parts(self.start.as_ptr(), self.len) };
         // Safety: start + len is within the slab (we ensured capacity on every write).
@@ -396,6 +422,11 @@ impl<'a> Scratch<'a> {
     fn grow_slow(&mut self, additional: usize) {
         let required = self.len.checked_add(additional).expect("scratch overflow");
         let new_cap = self.cap.saturating_mul(2).max(required);
+        debug_assert_eq!(
+            self.arena.ptr.get(),
+            self.start,
+            "arena allocated while a Scratch was alive"
+        );
 
         self.arena.grow(new_cap);
 
@@ -415,4 +446,8 @@ impl<'a> Scratch<'a> {
 
 #[cfg(test)]
 #[path = "../tests/unit/arena.rs"]
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "tests call the unsafe arena API directly to exercise its contract"
+)]
 mod tests;

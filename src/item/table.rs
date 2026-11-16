@@ -209,6 +209,9 @@ impl<'de> InnerTable<'de> {
         // SAFETY: idx was returned by find_index, so idx < len and the
         // pointer is within initialized entries. read() moves the value out.
         let ptr = unsafe { self.ptr.as_ptr().add(idx) };
+        // SAFETY: `ptr` is an initialized entry (see above); the slot is
+        // either overwritten below or dropped from the live range by
+        // `len -= 1`, so the value is not duplicated.
         let entry = unsafe { ptr.read() };
         if idx != last {
             // Safety: `last` is a valid, initialized index distinct from `idx`.
@@ -286,6 +289,9 @@ impl<'de> InnerTable<'de> {
             }
         }
         if run_start < len {
+            // SAFETY: entries[run_start..len] have scalar values (the loop
+            // above deep cloned every aggregate) and Key is Copy, so a
+            // bitwise copy is correct; dst is a fresh, disjoint allocation.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     src.add(run_start),

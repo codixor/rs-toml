@@ -181,9 +181,10 @@ pub mod flatten_any {
     ) {
         let entries = partial.table.entries();
         let entry_size = std::mem::size_of::<(Key<'_>, Item<'_>)>();
-        let base = entries.as_ptr() as *const u8;
-        // SAFETY: entries is a valid slice; one-past-the-end is a valid pointer.
-        let end = unsafe { base.add(entries.len() * entry_size) };
+        // Compare plain addresses: recorded error pointers may have any
+        // provenance, so they are never offset or dereferenced.
+        let base = entries.as_ptr().addr();
+        let end = base + entries.len() * entry_size;
 
         // Note: We could make faster index, but we reuse this same index format
         // to reduce code bloat, for this edge case.
@@ -222,12 +223,11 @@ pub mod flatten_any {
                 error.span = parent.span();
                 continue;
             }
-            let ptr = error.path.uncomputed_ptr() as *const u8;
+            let ptr = error.path.uncomputed_ptr().addr();
             if ptr < base || ptr >= end {
                 continue;
             }
-            // SAFETY: ptr is within the entries allocation; byte_offset_from is valid.
-            let byte_offset = unsafe { ptr.byte_offset_from(base) } as usize;
+            let byte_offset = ptr - base;
             let entry_index = byte_offset / entry_size;
             if let Some((key, _)) = &entries.get(entry_index) {
                 if let Some((_, item)) = parent.value.get_entry_with_maybe_index(key.name, index) {
