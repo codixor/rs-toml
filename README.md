@@ -38,7 +38,14 @@ Additive features:
 - `derive`
   - re-exports `#[derive(Toml)]` from [`rs-toml/macros`](./macros)
 - `serde`
-  - enables the serde-facing glue in [`impl_serde.rs`](./src/impl_serde.rs)
+  - `Serialize` for `Item`, `Table`, `Document` and `Spanned` in
+    [`impl_serde.rs`](./src/impl_serde.rs)
+  - `Deserialize` support in [`serde.rs`](./src/serde.rs):
+    `rs_toml::serde::from_str` (a drop-in for `toml::from_str`),
+    `from_document`/`from_item` for borrowed results, and
+    `rs_toml::serde::Error`, which carries the byte span of the offending key
+    or value. Datetimes deserialize as RFC 3339 strings. The crate-level
+    `rs_toml::from_str` stays the `FromToml` entry point.
 
 ## Examples
 
