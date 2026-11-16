@@ -24,7 +24,9 @@ fuzz_target!(|data: &[u8]| {
     let arena2 = Arena::new();
     let reparsed = match rs_toml::parse(emitted, &arena2) {
         Ok(doc) => doc,
-        Err(err) => panic!("emitted TOML does not re-parse: {err:?}\n--- input\n{input}\n--- emitted\n{emitted}"),
+        Err(err) => panic!(
+            "emitted TOML does not re-parse: {err:?}\n--- input\n{input}\n--- emitted\n{emitted}"
+        ),
     };
     let roundtrip = from_rs_toml(&reparsed.into_item());
     assert!(

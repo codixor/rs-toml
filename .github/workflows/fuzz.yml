@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse, diff_toml]
+        target: [parse, diff_toml, vault_server_config, vault_import_config]
     steps:
       - uses: actions/checkout@v4
         with:

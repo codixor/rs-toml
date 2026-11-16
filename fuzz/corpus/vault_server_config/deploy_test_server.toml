@@ -1,0 +1,42 @@
+# vault-server for the TEST stack only (deploy/test). Unlike
+# deploy/container it does not require an encrypted volume, because a
+# Docker Desktop/WSL host cannot give the container a LUKS disk.
+operators = ["sha256:OPERATOR_FINGERPRINT"]
+require_encrypted_volume = false
+
+[listener]
+address = "0.0.0.0:8200"
+tls_cert_file = "/etc/cvault/tls/server.pem"
+tls_key_file = "/etc/cvault/tls/server-key.pem"
+client_ca_file = "/etc/cvault/tls/ca.pem"
+
+[unix]
+path = "/run/cvault/api/vault.sock"
+mode = "0660"
+
+# Storage and freshness anchor on two different PostgreSQL servers, over
+# verified TLS 1.3 (VAULT_DESIGN.md §5.2, §5.4).
+[storage]
+type = "postgres"
+connection = "host=pg-storage dbname=vault user=vault"
+password_file = "/etc/cvault/pg-password"
+ca_file = "/etc/cvault/tls/ca.pem"
+
+[anchor]
+type = "postgres"
+connection = "host=pg-anchor dbname=anchor user=vault"
+password_file = "/etc/cvault/pg-password"
+ca_file = "/etc/cvault/tls/ca.pem"
+
+[[audit]]
+type = "file"
+path = "/var/lib/cvault/audit.log"
+
+[ui]
+dir = "/usr/share/cvault/ui"
+
+# App connections (dynamic secrets, rotation): the vault may reach only this
+# database, over verified TLS. Test only: it is the storage server.
+[[outbound]]
+url = "postgresql://pg-storage:5432"
+ca_file = "/etc/cvault/tls/ca.pem"

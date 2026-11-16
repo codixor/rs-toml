@@ -1,0 +1,53 @@
+# vault-import: copy OpenBao KV v2 mounts into vault-core (VAULT_DESIGN.md §12).
+#
+#   vault-import --config import.toml --dry-run   # what would happen, no writes
+#   vault-import --config import.toml             # import; run it twice
+#
+# Token and key files must be regular files that only their owner can read
+# (chmod 600). Tokens are never taken from arguments or the environment.
+
+# mlockall before anything is read, like vault-server. Needs CAP_IPC_LOCK and
+# an unlimited memlock limit (Docker: cap_add: [IPC_LOCK], ulimits: memlock: -1);
+# set to false only with swap off on the host.
+mlock = true
+
+[source]                                         # OpenBao, read only
+address = "https://openbao.internal:8200"        # the active node: redirects are not followed
+ca_file = "/etc/vault-import/openbao-ca.pem"     # only these CAs are trusted
+token_file = "/run/secrets/openbao-import-token"
+# namespace = "team-a"                           # sent as X-Vault-Namespace
+# cert_file = "/etc/vault-import/openbao-client.pem"   # if OpenBao requires
+# key_file = "/etc/vault-import/openbao-client-key.pem" # client certificates
+
+[target]                                         # vault-core (vault-server, mTLS)
+address = "https://vault.internal:8200"
+ca_file = "/etc/vault-import/vault-ca.pem"
+cert_file = "/etc/vault-import/import.pem"
+key_file = "/etc/vault-import/import-key.pem"
+token_file = "/run/secrets/vault-import-token"
+
+# One table per mount, run in order.
+[[kv]]
+source = "secret"                                # OpenBao KV v2 mount
+target = "secret"                                # vault-core KV v2 mount
+
+[[kv]]
+source = "apps"
+target = "secret"
+source_prefix = "trading/"                       # only this folder of the mount
+target_prefix = "openbao/trading/"               # trading/<p> becomes openbao/trading/<p>
+on_conflict = "fail"                             # the default; "new_version" writes on top
+max_entries = 100000                             # secrets and folders this table may walk
+
+# Into an environment of a `secrets` engine, after the [[kv]] tables: each
+# OpenBao path becomes a folder, each key in it a secret. The project and
+# the environment must exist (sys/projects/<slug>).
+[[secrets]]
+source = "apps"
+source_prefix = "web/"
+target = "projects/trading/secrets"              # the project's engine
+environment = "prod"
+folder = "openbao/"                              # web/<p> becomes the folder openbao/<p>/
+on_conflict = "fail"
+non_string = "fail"                              # "json" writes numbers, booleans... as JSON text
+custom_metadata = "skip"                         # "copy": it decides policy conditions there (§4.13)

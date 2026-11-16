@@ -75,7 +75,9 @@ pub fn from_rs_toml(item: &rs_toml::Item<'_>) -> Tree {
         Value::Boolean(b) => Tree::Boolean(*b),
         Value::DateTime(dt) => Tree::Datetime(Datetime {
             date: dt.date().map(|d| (d.year, d.month, d.day)),
-            time: dt.time().map(|t| (t.hour, t.minute, t.second, t.nanosecond)),
+            time: dt
+                .time()
+                .map(|t| (t.hour, t.minute, t.second, t.nanosecond)),
             offset: dt.offset().map(|o| match o {
                 rs_toml::TimeOffset::Z => None,
                 rs_toml::TimeOffset::Custom { minutes } => Some(minutes),
@@ -131,4 +133,73 @@ pub fn from_toml_table(table: &toml::Table) -> Tree {
             .map(|(key, value)| (key.clone(), from_toml(value)))
             .collect(),
     )
+}
+
+impl Tree {
+    /// True if the tree holds a datetime anywhere. rs-toml's serde layer
+    /// presents datetimes as RFC 3339 strings (documented in
+    /// `rs_toml::serde`); the `toml` crate presents them as its private
+    /// `Datetime` map, which a `String` field rejects.
+    pub fn has_datetime(&self) -> bool {
+        match self {
+            Tree::Datetime(_) => true,
+            Tree::Array(items) => items.iter().any(Tree::has_datetime),
+            Tree::Table(map) => map.values().any(Tree::has_datetime),
+            _ => false,
+        }
+    }
+}
+
+pub mod vault;
+
+/// Differential serde check shared by the `vault_*_config` targets:
+/// `rs_toml::serde::from_str::<T>` and `toml::from_str::<T>` must both
+/// succeed with equal values or both fail, and an rs-toml error span must lie
+/// within the input.
+///
+/// Intentional divergences (the input is ignored when rs-toml accepts and
+/// `toml` rejects, and only then):
+/// - the document holds an integer outside `i64` (rs-toml parses `i128`,
+///   `toml` rejects the document);
+/// - the document holds a datetime (rs-toml deserializes it as a string,
+///   `toml` as its private datetime type).
+pub fn check_serde<T>(input: &str)
+where
+    T: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let ours = rs_toml::serde::from_str::<T>(input);
+    let theirs = toml::from_str::<T>(input);
+
+    if let Err(err) = &ours
+        && let Some(span) = err.span()
+    {
+        assert!(
+            span.start <= span.end && span.end <= input.len(),
+            "rs-toml error span {span:?} outside input of {} bytes\n--- input\n{input:?}\n--- error\n{err:?}",
+            input.len()
+        );
+    }
+
+    match (ours, theirs) {
+        (Ok(ours), Ok(theirs)) => assert!(
+            ours == theirs,
+            "values differ\n--- input\n{input:?}\n--- rs-toml\n{ours:#?}\n--- toml\n{theirs:#?}"
+        ),
+        (Err(_), Err(_)) => {}
+        (Ok(ours), Err(err)) => {
+            let arena = rs_toml::Arena::new();
+            let tree = rs_toml::parse(input, &arena)
+                .map(|doc| from_rs_toml_table(doc.table()))
+                .expect("rs-toml serde accepted a document rs-toml cannot parse");
+            if tree.has_wide_integer() || tree.has_datetime() {
+                return;
+            }
+            panic!(
+                "rs-toml accepts, toml rejects\n--- input\n{input:?}\n--- rs-toml\n{ours:#?}\n--- toml error\n{err}"
+            );
+        }
+        (Err(err), Ok(theirs)) => panic!(
+            "rs-toml rejects, toml accepts\n--- input\n{input:?}\n--- rs-toml error\n{err:?}\n--- toml\n{theirs:#?}"
+        ),
+    }
 }

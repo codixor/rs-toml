@@ -1,0 +1,13 @@
+operators = ["spiffe://corp.internal/operator/med"]
+[listener]
+address = "127.0.0.1:8200"
+tls_cert_file = "server.pem"
+tls_key_file = "server-key.pem"
+client_ca_file = "client-ca.pem"
+operator_ca_file = "operator-ca.pem"
+[storage]
+type = "file"
+path = "/var/lib/vault"
+[[audit]]
+type = "file"
+path = "/var/log/vault/audit.log"

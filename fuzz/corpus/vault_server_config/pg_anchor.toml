@@ -1,0 +1,16 @@
+operators = ["spiffe://corp.internal/operator/med"]
+allow_unaudited = true
+[listener]
+address = "127.0.0.1:8200"
+tls_cert_file = "server.pem"
+tls_key_file = "server-key.pem"
+client_ca_file = "client-ca.pem"
+[storage]
+type = "file"
+path = "/var/lib/vault"
+[anchor]
+type = "postgres"
+connection = "host=anchor.example.org dbname=anchor"
+timeout = "30s"
+table = "s.t"
+name = "n"

@@ -34,7 +34,9 @@ fuzz_target!(|data: &[u8]| {
             panic!("rs-toml accepts, toml rejects\n--- input\n{input:?}\n--- toml error\n{err}");
         }
         (Err(err), Ok(_)) => {
-            panic!("rs-toml rejects, toml accepts\n--- input\n{input:?}\n--- rs-toml error\n{err:?}");
+            panic!(
+                "rs-toml rejects, toml accepts\n--- input\n{input:?}\n--- rs-toml error\n{err:?}"
+            );
         }
     }
 });

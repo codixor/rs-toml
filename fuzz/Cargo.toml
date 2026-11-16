@@ -15,7 +15,8 @@ path = "src/lib.rs"
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-rs-toml = { path = ".." }
+rs-toml = { path = "..", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
 
 [[bin]]
@@ -28,6 +29,20 @@ bench = false
 [[bin]]
 name = "diff_toml"
 path = "fuzz_targets/diff_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_server_config"
+path = "fuzz_targets/vault_server_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_import_config"
+path = "fuzz_targets/vault_import_config.rs"
 test = false
 doc = false
 bench = false
