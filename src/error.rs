@@ -184,6 +184,9 @@ impl MaybeTomlPath {
         self.size == 0 && self.len != u32::MAX
     }
 
+    /// The address recorded by [`uncomputed`](Self::uncomputed). Callers
+    /// must only compare it or offset it after checking it lies inside a
+    /// slice they hold; it is never valid to dereference on its own.
     pub(crate) fn uncomputed_ptr(&self) -> *const () {
         self.ptr.as_ptr() as *const ()
     }
@@ -217,9 +220,23 @@ impl Drop for MaybeTomlPath {
     }
 }
 
-// SAFETY: TomlPath owns its allocation entirely and contains no thread-local state.
+// SAFETY: `MaybeTomlPath` is in one of three states:
+// - empty (`len == u32::MAX`): `ptr` is dangling and never used.
+// - computed (`size > 0`): `ptr` is a heap allocation owned exclusively by
+//   this value (component array plus the key bytes it points into); it is
+//   freed only in `Drop` and read only through `&self`, so moving it to
+//   another thread or sharing `&self` is like doing so with a `Box<[u8]>`.
+// - uncomputed (`size == 0`, `len == 0`): `ptr` is the address of an
+//   `Item` borrowed from a parsed tree. It is NOT owned and may dangle once
+//   the arena is gone. It is never dereferenced: `as_toml_path` and `Drop`
+//   ignore it (`has_path()` and `size > 0` are false), and the only reader,
+//   `uncomputed_ptr`, feeds address comparisons in `de::compute_paths` and
+//   `helper`, which do pointer arithmetic only after checking that the
+//   address lies inside a live slice they hold. An address carries no
+//   thread affinity, so sending or sharing it cannot cause a data race.
 unsafe impl Send for MaybeTomlPath {}
-// SAFETY: &TomlPath only gives &[PathComponent] access, which is safe to share.
+// SAFETY: see `Send` above; `&MaybeTomlPath` only allows reading the owned
+// allocation or copying the opaque address.
 unsafe impl Sync for MaybeTomlPath {}
 
 /// A single error from parsing or converting a TOML document.
