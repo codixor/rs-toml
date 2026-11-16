@@ -9,7 +9,7 @@ edition = "2024"
 rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/codixor/rs-toml"
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace.dependencies]
 foldhash = "0.2.0"
@@ -61,7 +61,7 @@ path = "src/lib.rs"
 foldhash.workspace = true
 serde = { workspace = true, features = ["std"], optional = true }
 thiserror.workspace = true
-rs-toml-macros = { package = "rs-toml-macros", version = "0.2.0", path = "macros", optional = true }
+rs-toml-macros = { package = "rs-toml-macros", version = "0.3.0", path = "macros", optional = true }
 zmij.workspace = true
 
 [dev-dependencies]
