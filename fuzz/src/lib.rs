@@ -9,7 +9,9 @@
 //! - Times store `second` and `nanosecond` with omitted parts as `0`; the
 //!   number of fractional digits written in the source is not compared.
 //! - Integers are widened to `i128` (rs-toml accepts the full `i128` range;
-//!   the `toml` crate only accepts `i64`; see [`Tree::has_wide_integer`]).
+//!   the `toml` crate only accepts `i64`; see [`Tree::has_wide_integer`] and
+//!   [`neutralize`], which rewrites just those values so the rest of a
+//!   document is still compared).
 
 use std::collections::BTreeMap;
 
@@ -152,54 +154,159 @@ impl Tree {
 
 pub mod vault;
 
-/// Differential serde check shared by the `vault_*_config` targets:
-/// `rs_toml::serde::from_str::<T>` and `toml::from_str::<T>` must both
-/// succeed with equal values or both fail, and an rs-toml error span must lie
-/// within the input.
-///
-/// Intentional divergences (the input is ignored when rs-toml accepts and
-/// `toml` rejects, and only then):
-/// - the document holds an integer outside `i64` (rs-toml parses `i128`,
-///   `toml` rejects the document);
-/// - the document holds a datetime (rs-toml deserializes it as a string,
-///   `toml` as its private datetime type).
-pub fn check_serde<T>(input: &str)
-where
-    T: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
-{
-    let ours = rs_toml::serde::from_str::<T>(input);
-    let theirs = toml::from_str::<T>(input);
+/// Which intentionally divergent values [`neutralize`] rewrites.
+#[derive(Clone, Copy)]
+pub struct Neutralize {
+    /// Integers outside `i64` become `0` (rs-toml parses `i128`, `toml`
+    /// rejects the whole document).
+    pub wide_integers: bool,
+    /// Datetimes become the basic string rs-toml's serde layer presents
+    /// them as (`toml` presents its private datetime type instead).
+    pub datetimes: bool,
+}
 
-    if let Err(err) = &ours
-        && let Some(span) = err.span()
-    {
+/// Rewrites only the intentionally divergent values of `input`, located
+/// by the spans rs-toml reports for them, so everything else in the same
+/// document can still be compared. Returns `None` when there is nothing to
+/// rewrite.
+pub fn neutralize(input: &str, table: &rs_toml::Table<'_>, what: Neutralize) -> Option<String> {
+    fn collect(item: &rs_toml::Item<'_>, what: Neutralize, out: &mut Vec<(usize, usize, String)>) {
+        use rs_toml::Value;
+        match item.value() {
+            Value::Integer(i) if what.wide_integers && i64::try_from(i.as_i128()).is_err() => {
+                let span = item.span();
+                out.push((span.start as usize, span.end as usize, "0".to_owned()));
+            }
+            Value::DateTime(dt) if what.datetimes => {
+                let mut buf = std::mem::MaybeUninit::uninit();
+                let span = item.span();
+                let text = format!("\"{}\"", dt.format(&mut buf));
+                out.push((span.start as usize, span.end as usize, text));
+            }
+            Value::Array(array) => array.iter().for_each(|i| collect(i, what, out)),
+            Value::Table(table) => table.iter().for_each(|(_, i)| collect(i, what, out)),
+            _ => {}
+        }
+    }
+    let mut edits = Vec::new();
+    collect(table.as_item(), what, &mut edits);
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|e| e.0);
+    let mut out = String::with_capacity(input.len());
+    let mut at = 0;
+    for (start, end, text) in edits {
+        assert!(
+            at <= start && start < end && end <= input.len(),
+            "bad value span {start}..{end} in {input:?}"
+        );
+        out.push_str(&input[at..start]);
+        out.push_str(&text);
+        at = end;
+    }
+    out.push_str(&input[at..]);
+    Some(out)
+}
+
+impl Tree {
+    /// Maps integers outside `i64` to `0`, matching [`neutralize`].
+    pub fn zero_wide_integers(&mut self) {
+        match self {
+            Tree::Integer(i) if i64::try_from(*i).is_err() => *i = 0,
+            Tree::Array(items) => items.iter_mut().for_each(Tree::zero_wide_integers),
+            Tree::Table(map) => map.values_mut().for_each(Tree::zero_wide_integers),
+            _ => {}
+        }
+    }
+}
+
+fn assert_span_in_input(input: &str, err: &rs_toml::serde::Error) {
+    if let Some(span) = err.span() {
         assert!(
             span.start <= span.end && span.end <= input.len(),
             "rs-toml error span {span:?} outside input of {} bytes\n--- input\n{input:?}\n--- error\n{err:?}",
             input.len()
         );
     }
+}
 
+fn compare_serde<T>(
+    input: &str,
+    ours: Result<T, rs_toml::serde::Error>,
+    theirs: Result<T, toml::de::Error>,
+) where
+    T: PartialEq + std::fmt::Debug,
+{
     match (ours, theirs) {
         (Ok(ours), Ok(theirs)) => assert!(
             ours == theirs,
             "values differ\n--- input\n{input:?}\n--- rs-toml\n{ours:#?}\n--- toml\n{theirs:#?}"
         ),
         (Err(_), Err(_)) => {}
-        (Ok(ours), Err(err)) => {
-            let arena = rs_toml::Arena::new();
-            let tree = rs_toml::parse(input, &arena)
-                .map(|doc| from_rs_toml_table(doc.table()))
-                .expect("rs-toml serde accepted a document rs-toml cannot parse");
-            if tree.has_wide_integer() || tree.has_datetime() {
-                return;
-            }
-            panic!(
-                "rs-toml accepts, toml rejects\n--- input\n{input:?}\n--- rs-toml\n{ours:#?}\n--- toml error\n{err}"
-            );
-        }
+        (Ok(ours), Err(err)) => panic!(
+            "rs-toml accepts, toml rejects\n--- input\n{input:?}\n--- rs-toml\n{ours:#?}\n--- toml error\n{err}"
+        ),
         (Err(err), Ok(theirs)) => panic!(
             "rs-toml rejects, toml accepts\n--- input\n{input:?}\n--- rs-toml error\n{err:?}\n--- toml\n{theirs:#?}"
         ),
     }
+}
+
+/// Differential serde check shared by the `vault_*_config` targets:
+/// `rs_toml::serde::from_str::<T>` and `toml::from_str::<T>` must both
+/// succeed with equal values or both fail, and an rs-toml error span must lie
+/// within the input.
+///
+/// Intentional divergences are neutralised per value, not by skipping the
+/// document (see [`neutralize`]): integers outside `i64` become `0` and
+/// datetimes become the strings rs-toml presents them as, in the text both
+/// parsers then read. Without wide integers, rs-toml must also give the
+/// same result for the original and the rewritten text, which checks the
+/// datetime-as-string data model.
+pub fn check_serde<T>(input: &str)
+where
+    T: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let ours = rs_toml::serde::from_str::<T>(input);
+    if let Err(err) = &ours {
+        assert_span_in_input(input, err);
+    }
+
+    let arena = rs_toml::Arena::new();
+    let rewritten = match rs_toml::parse(input, &arena) {
+        Ok(doc) => {
+            let what = Neutralize {
+                wide_integers: true,
+                datetimes: true,
+            };
+            neutralize(input, doc.table(), what).map(|text| {
+                let wide = from_rs_toml_table(doc.table()).has_wide_integer();
+                (text, wide)
+            })
+        }
+        Err(_) => None,
+    };
+
+    let Some((rewritten, wide)) = rewritten else {
+        compare_serde(input, ours, toml::from_str::<T>(input));
+        return;
+    };
+    let ours_rewritten = rs_toml::serde::from_str::<T>(&rewritten);
+    if let Err(err) = &ours_rewritten {
+        assert_span_in_input(&rewritten, err);
+    }
+    if !wide {
+        match (&ours, &ours_rewritten) {
+            (Ok(a), Ok(b)) => assert!(
+                a == b,
+                "datetime as string changed the value\n--- input\n{input:?}\n--- rewritten\n{rewritten:?}"
+            ),
+            (Err(_), Err(_)) => {}
+            _ => panic!(
+                "datetime as string changed acceptance\n--- input\n{input:?}\n--- rewritten\n{rewritten:?}\n--- original\n{ours:?}\n--- rewritten result\n{ours_rewritten:?}"
+            ),
+        }
+    }
+    compare_serde(&rewritten, ours_rewritten, toml::from_str::<T>(&rewritten));
 }
