@@ -225,9 +225,14 @@ pub use rs_toml_macros::Toml;
 #[cfg(feature = "serde")]
 pub mod impl_serde;
 
+#[cfg(feature = "serde")]
+pub mod serde;
+
 /// Parses and deserializes a TOML document in one step.
 ///
 /// For borrowing or non-fatal errors, use [`parse`] and [`Document`] methods.
+/// For types implementing `serde::Deserialize`, use `rs_toml::serde::from_str`
+/// (the `serde` feature).
 ///
 /// # Errors
 ///

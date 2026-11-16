@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- serde `Deserialize` support behind the `serde` feature: `rs_toml::serde`
+  with `from_str`, `from_document`, `from_item`, `ItemDeserializer` and a
+  spanned `Error` implementing `serde::de::Error`. It reads the tree built by
+  the existing parser and supports `deny_unknown_fields`, defaults, `Option`,
+  internally/externally/adjacently tagged and untagged enums, `flatten` and
+  `deserialize_with`. Integers are range checked, never wrapped; datetimes
+  deserialize as strings.
+
 ## 0.1.1 — 2026-11-15
 
 ### Fixed

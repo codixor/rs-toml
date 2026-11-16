@@ -70,6 +70,8 @@ anstyle-svg.workspace = true
 criterion.workspace = true
 oorandom.workspace = true
 pretty_assertions.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+toml = "1.2.1"
 
 [[example]]
 name = "derive"
