@@ -3,134 +3,68 @@
 mod tests;
 
 use crate::MaybeItem;
-use crate::Span;
 use crate::arena::Arena;
-use crate::item::{ArrayStyle, FLAG_AOT, FLAG_ARRAY, Item, ItemMetadata, TAG_ARRAY};
-use std::mem::size_of;
-use std::ptr::NonNull;
+use crate::item::{ArrayStyle, FLAG_AOT, FLAG_ARRAY, Item};
+use crate::raw::vec::ArenaVec;
 
-const MIN_CAP: u32 = 4;
-
-#[repr(C, align(8))]
-pub(crate) struct InternalArray<'de> {
-    pub(super) len: u32,
-    pub(super) cap: u32,
-    pub(super) ptr: NonNull<Item<'de>>,
-}
-
-impl<'de> Default for InternalArray<'de> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Arena-backed storage of an array's items.
+#[repr(transparent)]
+#[derive(Default)]
+pub(crate) struct InternalArray<'de>(ArenaVec<'de, Item<'de>>);
 
 impl<'de> InternalArray<'de> {
     #[inline]
     pub(crate) fn new() -> Self {
-        Self {
-            len: 0,
-            cap: 0,
-            ptr: NonNull::dangling(),
-        }
+        Self(ArenaVec::new())
     }
 
     pub(crate) fn with_capacity(cap: u32, arena: &'de Arena) -> Self {
-        let mut arr = Self::new();
-        if cap > 0 {
-            arr.grow_to(cap, arena);
-        }
-        arr
+        Self(ArenaVec::with_capacity(cap, arena))
     }
 
     pub(crate) fn with_single(value: Item<'de>, arena: &'de Arena) -> Self {
-        let mut arr = Self::with_capacity(MIN_CAP, arena);
-        // SAFETY: with_capacity allocated space for at least MIN_CAP items,
-        // so writing at index 0 is within bounds.
-        unsafe {
-            arr.ptr.as_ptr().write(value);
-        }
-        arr.len = 1;
+        let mut arr = Self::with_capacity(4, arena);
+        arr.push(value, arena);
         arr
     }
 
     #[inline]
     pub(crate) fn push(&mut self, value: Item<'de>, arena: &'de Arena) {
-        let len = self.len;
-        if len == self.cap {
-            self.grow(arena);
-        }
-        // SAFETY: grow() ensures len < cap, so ptr.add(len) is within the allocation.
-        unsafe {
-            self.ptr.as_ptr().add(len as usize).write(value);
-        }
-        self.len = len + 1;
+        self.0.push(value, arena);
     }
 
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.len as usize
+        self.0.len()
     }
 
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
-        self.len == 0
+        self.0.is_empty()
     }
 
     #[inline]
     pub(crate) fn get(&self, index: usize) -> Option<&Item<'de>> {
-        if index < self.len as usize {
-            // SAFETY: index < len is checked above, so the pointer is within
-            // initialized elements.
-            Some(unsafe { &*self.ptr.as_ptr().add(index) })
-        } else {
-            None
-        }
+        self.as_slice().get(index)
     }
 
     #[inline]
     pub(crate) fn get_mut(&mut self, index: usize) -> Option<&mut Item<'de>> {
-        if index < self.len as usize {
-            // SAFETY: index < len is checked above.
-            Some(unsafe { &mut *self.ptr.as_ptr().add(index) })
-        } else {
-            None
-        }
+        self.as_mut_slice().get_mut(index)
     }
 
     pub(crate) fn remove(&mut self, index: usize) -> Item<'de> {
-        assert!(index < self.len as usize, "index out of bounds");
-        let len = self.len as usize;
-        // SAFETY: index < len is asserted, so ptr.add(index) is in bounds.
-        // copy within the same allocation shifts elements left by one.
-        unsafe {
-            let ptr = self.ptr.as_ptr().add(index);
-            let removed = ptr.read();
-            std::ptr::copy(ptr.add(1), ptr, len - index - 1);
-            self.len -= 1;
-            removed
-        }
+        self.0.remove(index)
     }
 
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<Item<'de>> {
-        if self.len == 0 {
-            None
-        } else {
-            self.len -= 1;
-            // SAFETY: len was > 0 and was just decremented, so ptr.add(len)
-            // points to the last initialized element.
-            Some(unsafe { self.ptr.as_ptr().add(self.len as usize).read() })
-        }
+        self.0.pop()
     }
 
     #[inline]
     pub(crate) fn last_mut(&mut self) -> Option<&mut Item<'de>> {
-        if self.len == 0 {
-            None
-        } else {
-            // SAFETY: len > 0 is checked above, so ptr.add(len - 1) is within bounds.
-            Some(unsafe { &mut *self.ptr.as_ptr().add(self.len as usize - 1) })
-        }
+        self.as_mut_slice().last_mut()
     }
 
     #[inline]
@@ -140,106 +74,21 @@ impl<'de> InternalArray<'de> {
 
     #[inline]
     pub(crate) fn as_slice(&self) -> &[Item<'de>] {
-        if self.len == 0 {
-            &[]
-        } else {
-            // SAFETY: len > 0 is checked above. ptr points to arena-allocated
-            // memory with at least len initialized items.
-            unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize) }
-        }
+        self.0.as_slice()
     }
 
     #[inline]
     pub(crate) fn as_mut_slice(&mut self) -> &mut [Item<'de>] {
-        if self.len == 0 {
-            &mut []
-        } else {
-            // SAFETY: same as as_slice() — ptr is valid for len initialized items.
-            unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len as usize) }
-        }
-    }
-
-    #[cold]
-    fn grow(&mut self, arena: &'de Arena) {
-        let new_cap = if self.cap == 0 {
-            MIN_CAP
-        } else {
-            self.cap.checked_mul(2).expect("capacity overflow")
-        };
-        self.grow_to(new_cap, arena);
-    }
-
-    fn grow_to(&mut self, new_cap: u32, arena: &'de Arena) {
-        // On 64-bit, u32 * size_of::<Item>() cannot overflow usize.
-        #[cfg(target_pointer_width = "32")]
-        let new_size = (new_cap as usize)
-            .checked_mul(size_of::<Item<'_>>())
-            .expect("capacity overflow");
-        #[cfg(not(target_pointer_width = "32"))]
-        let new_size = new_cap as usize * size_of::<Item<'_>>();
-        if self.cap > 0 {
-            let old_size = self.cap as usize * size_of::<Item<'_>>();
-            // Safety: ptr was returned by a prior arena alloc of old_size bytes.
-            self.ptr = unsafe { arena.realloc(self.ptr.cast(), old_size, new_size).cast() };
-        } else {
-            self.ptr = arena.alloc(new_size).cast();
-        }
-        self.cap = new_cap;
+        self.0.as_mut_slice()
     }
 
     /// Deep-clones this array into `arena`. Keys and strings are shared
     /// with the source.
     pub(crate) fn clone_in(&self, arena: &'de Arena) -> Self {
-        let len = self.len as usize;
-        if len == 0 {
+        if self.is_empty() {
             return Self::new();
         }
-        let size = len * size_of::<Item<'de>>();
-        let dst: NonNull<Item<'de>> = arena.alloc(size).cast();
-        let src = self.ptr.as_ptr();
-        let dst_ptr = dst.as_ptr();
-
-        let mut run_start = 0;
-        for i in 0..len {
-            // SAFETY: i < len, so src.add(i) is within initialized elements.
-            if unsafe { !(*src.add(i)).is_scalar() } {
-                if run_start < i {
-                    // SAFETY: src[run_start..i] are scalars — bitwise copy is
-                    // correct. Source and destination are disjoint arena regions.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            src.add(run_start),
-                            dst_ptr.add(run_start),
-                            i - run_start,
-                        );
-                    }
-                }
-                // SAFETY: the item is an aggregate; deep-clone it.
-                unsafe {
-                    dst_ptr.add(i).write((*src.add(i)).clone_in(arena));
-                }
-                run_start = i + 1;
-            }
-        }
-        if run_start < len {
-            // SAFETY: src[run_start..len] are scalars (the loop above deep
-            // cloned every aggregate), so a bitwise copy is correct; both
-            // ranges are within `len` elements and the regions are disjoint
-            // (dst is a fresh arena allocation).
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    src.add(run_start),
-                    dst_ptr.add(run_start),
-                    len - run_start,
-                );
-            }
-        }
-
-        Self {
-            len: self.len,
-            cap: self.len,
-            ptr: dst,
-        }
+        Self(self.0.map_in(arena, |item| item.clone_in(arena)))
     }
 }
 
@@ -267,44 +116,12 @@ impl<'a, 'de> IntoIterator for &'a mut InternalArray<'de> {
     }
 }
 
-/// Consuming iterator over an [`InternalArray`], yielding [`Item`]s.
-pub(crate) struct InternalArrayIntoIter<'de> {
-    arr: InternalArray<'de>,
-    index: u32,
-}
-
-impl<'de> Iterator for InternalArrayIntoIter<'de> {
-    type Item = Item<'de>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.arr.len {
-            // SAFETY: index < len is checked above, so the read is within
-            // initialized elements.
-            let val = unsafe { self.arr.ptr.as_ptr().add(self.index as usize).read() };
-            self.index += 1;
-            Some(val)
-        } else {
-            None
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = (self.arr.len - self.index) as usize;
-        (remaining, Some(remaining))
-    }
-}
-
-impl<'de> ExactSizeIterator for InternalArrayIntoIter<'de> {}
-
 impl<'de> IntoIterator for InternalArray<'de> {
     type Item = Item<'de>;
-    type IntoIter = InternalArrayIntoIter<'de>;
+    type IntoIter = crate::raw::vec::IntoIter<'de, Item<'de>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        InternalArrayIntoIter {
-            arr: self,
-            index: 0,
-        }
+        self.0.into_iter()
     }
 }
 
@@ -320,87 +137,9 @@ impl<'de> std::ops::Index<usize> for InternalArray<'de> {
     }
 }
 
-// Public Array wrapper (same layout as Item when tag == TAG_ARRAY)
-
-/// A TOML array with span information.
-///
-/// An `Array` stores [`Item`] elements in insertion order with arena-allocated
-/// backing storage. It carries the byte-offset [`Span`] from the source
-/// document.
-///
-/// # Accessing elements
-///
-/// - **Index operator**: `array[i]` returns a [`MaybeItem`] that never
-///   panics on out-of-bounds access.
-/// - **`get` / `get_mut`**: return `Option<&Item>` / `Option<&mut Item>`.
-/// - **Iteration**: `for item in &array { ... }`.
-///
-/// # Mutation
-///
-/// [`push`](Self::push) appends an element. An [`Arena`] is required because
-/// array storage is arena-allocated.
-#[repr(C)]
-pub struct Array<'de> {
-    pub(crate) value: InternalArray<'de>,
-    pub(crate) meta: ItemMetadata,
-}
-
-const _: () = assert!(std::mem::size_of::<Array<'_>>() == std::mem::size_of::<Item<'_>>());
-const _: () = assert!(std::mem::align_of::<Array<'_>>() == std::mem::align_of::<Item<'_>>());
+pub use crate::raw::item::Array;
 
 impl<'de> Array<'de> {
-    /// Creates an empty array in format-hints mode (no source span).
-    ///
-    /// The array starts with automatic style: normalization will choose
-    /// between inline and header (array-of-tables) based on content. Call
-    /// [`set_style`](Self::set_style) to override.
-    pub fn new() -> Self {
-        let mut meta = ItemMetadata::hints(TAG_ARRAY, FLAG_ARRAY);
-        meta.set_auto_style();
-        Self {
-            meta,
-            value: InternalArray::new(),
-        }
-    }
-
-    /// Creates an empty array with pre-allocated capacity.
-    ///
-    /// Returns `None` if `cap` exceeds [`MAX_CAPACITY`](crate::MAX_CAPACITY).
-    pub fn try_with_capacity(cap: usize, arena: &'de Arena) -> Option<Self> {
-        if cap > crate::MAX_CAPACITY {
-            return None;
-        }
-        let cap: u32 = cap.try_into().ok()?;
-        let mut meta = ItemMetadata::hints(TAG_ARRAY, FLAG_ARRAY);
-        meta.set_auto_style();
-        Some(Self {
-            meta,
-            value: InternalArray::with_capacity(cap, arena),
-        })
-    }
-
-    /// Creates an empty array in span mode (parser-produced).
-    #[cfg(test)]
-    pub(crate) fn new_spanned(span: Span) -> Self {
-        Self {
-            meta: ItemMetadata::spanned(TAG_ARRAY, FLAG_ARRAY, span.start, span.end),
-            value: InternalArray::new(),
-        }
-    }
-
-    /// Returns the byte-offset span of this array in the source document.
-    /// Only valid on parser-produced arrays (span mode).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn span_unchecked(&self) -> Span {
-        self.meta.span_unchecked()
-    }
-
-    /// Returns the source span, or `0..0` if this array was constructed
-    /// programmatically (format-hints mode).
-    pub fn span(&self) -> Span {
-        self.meta.span()
-    }
-
     /// Appends a value to the end of the array.
     #[inline]
     pub fn push(&mut self, value: Item<'de>, arena: &'de Arena) {
@@ -472,29 +211,10 @@ impl<'de> Array<'de> {
         self.value.as_mut_slice()
     }
 
-    /// Converts this `Array` into an [`Item`] with the same span and payload.
-    pub fn as_item(&self) -> &Item<'de> {
-        // SAFETY: Array is #[repr(C)] { InternalArray, ItemMetadata }.
-        // Item  is #[repr(C)] { Payload,       ItemMetadata }.
-        // Payload is a union whose `array` field is ManuallyDrop<InternalArray>
-        // (#[repr(transparent)]). Both types are 24 bytes, align 8 (verified
-        // by const assertions). The field offsets match (data at 0..16,
-        // metadata at 16..24). Only a shared reference is returned.
-        unsafe { &*(self as *const Array<'de>).cast::<Item<'de>>() }
-    }
-
-    /// Converts this `Array` into an [`Item`] with the same span and payload.
-    pub fn into_item(self) -> Item<'de> {
-        // SAFETY: Same layout argument as as_item(). Size and alignment
-        // equality verified by const assertions. The tag in ItemMetadata is
-        // preserved unchanged through the transmute.
-        unsafe { std::mem::transmute(self) }
-    }
-
     /// Returns the kind of this array (inline or header/array-of-tables).
     #[inline]
     pub fn style(&self) -> ArrayStyle {
-        match self.meta.flag() {
+        match self.meta().flag() {
             FLAG_AOT => ArrayStyle::Header,
             _ => ArrayStyle::Inline,
         }
@@ -507,17 +227,8 @@ impl<'de> Array<'de> {
             ArrayStyle::Inline => FLAG_ARRAY,
             ArrayStyle::Header => FLAG_AOT,
         };
-        self.meta.set_flag(flag);
-        self.meta.clear_auto_style();
-    }
-
-    /// Deep-clones this array into `arena`. Keys and strings are shared
-    /// with the source.
-    pub fn clone_in(&self, arena: &'de Arena) -> Array<'de> {
-        Array {
-            value: self.value.clone_in(arena),
-            meta: self.meta,
-        }
+        self.meta_mut().set_flag(flag);
+        self.meta_mut().clear_auto_style();
     }
 }
 
@@ -564,29 +275,18 @@ impl<'a, 'de> IntoIterator for &'a mut Array<'de> {
 }
 
 /// Consuming iterator over an [`Array`], yielding [`Item`]s.
-pub struct IntoIter<'de> {
-    arr: InternalArray<'de>,
-    index: u32,
-}
+pub struct IntoIter<'de>(crate::raw::vec::IntoIter<'de, Item<'de>>);
 
 impl<'de> Iterator for IntoIter<'de> {
     type Item = Item<'de>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.arr.len {
-            // SAFETY: index < len is checked above, so the read is within
-            // initialized elements.
-            let val = unsafe { self.arr.ptr.as_ptr().add(self.index as usize).read() };
-            self.index += 1;
-            Some(val)
-        } else {
-            None
-        }
+        self.0.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = (self.arr.len - self.index) as usize;
-        (remaining, Some(remaining))
+        self.0.size_hint()
     }
 }
 
@@ -597,9 +297,6 @@ impl<'de> IntoIterator for Array<'de> {
     type IntoIter = IntoIter<'de>;
 
     fn into_iter(self) -> Self::IntoIter {
-        IntoIter {
-            arr: self.value,
-            index: 0,
-        }
+        IntoIter(self.value.into_iter())
     }
 }

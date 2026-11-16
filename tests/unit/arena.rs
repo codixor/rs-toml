@@ -131,23 +131,23 @@ fn scratch_basics() {
     arena.alloc(8);
 
     // push builds content byte by byte.
-    let mut scratch = unsafe { arena.scratch() };
+    let mut scratch = arena.scratch();
     scratch.push(b'h');
     scratch.push(b'i');
-    assert_eq!(scratch.as_bytes(), b"hi");
+    assert_eq!(scratch.as_str(), "hi");
     drop(scratch); // end borrow before creating next scratch
 
     // extend appends slices; length is tracked correctly.
-    let mut scratch = unsafe { arena.scratch() };
-    scratch.extend(b"hello ");
-    scratch.extend(b"world");
-    assert_eq!(scratch.as_bytes(), b"hello world");
+    let mut scratch = arena.scratch();
+    scratch.extend("hello ");
+    scratch.extend("world");
+    assert_eq!(scratch.as_str(), "hello world");
     assert_eq!(scratch.as_bytes().len(), 11);
     drop(scratch); // end borrow before creating next scratch
 
     // Empty scratch returns empty slice.
-    let scratch = unsafe { arena.scratch() };
-    assert_eq!(scratch.as_bytes(), b"");
+    let scratch = arena.scratch();
+    assert_eq!(scratch.as_str(), "");
 }
 
 #[test]
@@ -156,14 +156,14 @@ fn scratch_commit() {
     arena.alloc(8);
 
     // Commit returns the written data as a slice.
-    let mut scratch = unsafe { arena.scratch() };
-    scratch.extend(b"committed");
+    let mut scratch = arena.scratch();
+    scratch.extend("committed");
     let slice = scratch.commit();
-    assert_eq!(slice, b"committed");
+    assert_eq!(slice, "committed");
 
     // Committing advances the arena pointer so subsequent allocations don't overlap.
-    let mut scratch = unsafe { arena.scratch() };
-    scratch.extend(b"data");
+    let mut scratch = arena.scratch();
+    scratch.extend("data");
     let committed = scratch.commit();
     let next = arena.alloc(8);
     let committed_range =
@@ -171,9 +171,9 @@ fn scratch_commit() {
     assert!(!committed_range.contains(&(next.as_ptr() as usize)));
 
     // Committing an empty scratch returns an empty slice.
-    let scratch = unsafe { arena.scratch() };
+    let scratch = arena.scratch();
     let slice = scratch.commit();
-    assert_eq!(slice, b"");
+    assert_eq!(slice, "");
 }
 
 #[test]
@@ -184,16 +184,24 @@ fn scratch_drop_without_commit() {
 
     // Dropping without commit leaves the arena pointer unchanged.
     {
-        let mut scratch = unsafe { arena.scratch() };
-        scratch.extend(b"discarded");
+        let mut scratch = arena.scratch();
+        scratch.extend("discarded");
     }
     assert_eq!(arena.ptr.get(), ptr_before);
 
+    // Allocating while a scratch is alive never overlaps the scratch bytes.
+    let mut scratch = arena.scratch();
+    scratch.extend("abc");
+    let other = arena.alloc_str("xyz");
+    scratch.extend("def");
+    assert_eq!(scratch.commit(), "abcdef");
+    assert_eq!(other, "xyz");
+
     // A new scratch can be created after a dropped one.
-    let mut scratch = unsafe { arena.scratch() };
-    scratch.extend(b"kept");
+    let mut scratch = arena.scratch();
+    scratch.extend("kept");
     let committed = scratch.commit();
-    assert_eq!(committed, b"kept");
+    assert_eq!(committed, "kept");
 }
 
 #[test]
@@ -203,40 +211,42 @@ fn scratch_growth() {
     arena.alloc(8);
 
     // extend with a large pattern preserves all data across slab overflow.
-    let mut scratch = unsafe { arena.scratch() };
-    let pattern: Vec<u8> = (0u8..=255).cycle().take(2048).collect();
+    let mut scratch = arena.scratch();
+    let pattern: String = (b'a'..=b'z').cycle().take(2048).map(char::from).collect();
     scratch.extend(&pattern);
-    assert_eq!(scratch.as_bytes(), &pattern[..]);
+    assert_eq!(scratch.as_str(), pattern);
     drop(scratch); // end borrow before creating next scratch
 
     // push one byte at a time across growth boundaries preserves data.
-    let mut scratch = unsafe { arena.scratch() };
+    let mut scratch = arena.scratch();
     for i in 0..2048u16 {
-        scratch.push((i & 0xFF) as u8);
+        scratch.push((i & 0x7F) as u8);
     }
     assert_eq!(scratch.as_bytes().len(), 2048);
     for (i, &b) in scratch.as_bytes().iter().enumerate() {
-        assert_eq!(b, (i & 0xFF) as u8, "mismatch at index {i}");
+        assert_eq!(b, (i & 0x7F) as u8, "mismatch at index {i}");
     }
     drop(scratch); // end borrow before creating next scratch
 
     // Multiple growth rounds via chunked extend.
-    let mut scratch = unsafe { arena.scratch() };
-    let mut expected: Vec<u8> = Vec::new();
+    let mut scratch = arena.scratch();
+    let mut expected = String::new();
     for round in 0u8..10 {
-        let chunk: Vec<u8> = std::iter::repeat_n(round, 512).collect();
+        let chunk: String = std::iter::repeat_n(char::from(b'a' + round), 512).collect();
         scratch.extend(&chunk);
-        expected.extend(&chunk);
+        expected.push_str(&chunk);
     }
-    assert_eq!(scratch.as_bytes(), &expected[..]);
+    assert_eq!(scratch.as_str(), expected);
     drop(scratch); // end borrow before creating next scratch
 
     // Commit after growth returns correct data and doesn't overlap next alloc.
-    let mut scratch = unsafe { arena.scratch() };
-    let data: Vec<u8> = (0..2048).map(|i| (i % 251) as u8).collect();
+    let mut scratch = arena.scratch();
+    let data: String = (0..2048u32)
+        .map(|i| char::from(b'!' + (i % 90) as u8))
+        .collect();
     scratch.extend(&data);
     let committed = scratch.commit();
-    assert_eq!(committed, &data[..]);
+    assert_eq!(committed, data);
 
     let next = arena.alloc(64);
     let committed_end = committed.as_ptr() as usize + committed.len();
@@ -252,10 +262,10 @@ fn alloc_then_scratch_then_alloc() {
     unsafe { std::ptr::write_bytes(a.as_ptr(), 0xAA, 32) };
 
     // Scratch in the middle.
-    let mut scratch = unsafe { arena.scratch() };
-    scratch.extend(b"middle");
+    let mut scratch = arena.scratch();
+    scratch.extend("middle");
     let mid = scratch.commit();
-    assert_eq!(mid, b"middle");
+    assert_eq!(mid, "middle");
 
     // Second allocation.
     let b = arena.alloc(32);

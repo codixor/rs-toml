@@ -151,7 +151,7 @@ fn inner_iterators() {
     t.insert_unique(key("c"), ival(3), &arena);
 
     // IntoIter: collect and verify
-    let iter = IntoIter { table: t, index: 0 };
+    let iter = IntoIter(t.0.into_iter());
     assert_eq!(iter.size_hint(), (3, Some(3)));
     assert_eq!(iter.len(), 3);
     let vals: Vec<_> = iter.collect();
@@ -162,10 +162,7 @@ fn inner_iterators() {
     let mut t2 = InnerTable::new();
     t2.insert_unique(key("x"), ival(10), &arena);
     t2.insert_unique(key("y"), ival(20), &arena);
-    let mut iter = IntoIter {
-        table: t2,
-        index: 0,
-    };
+    let mut iter = IntoIter(t2.0.into_iter());
     assert_eq!(iter.size_hint(), (2, Some(2)));
     iter.next();
     assert_eq!(iter.size_hint(), (1, Some(1)));

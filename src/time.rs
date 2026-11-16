@@ -363,30 +363,29 @@ impl std::fmt::Debug for DateTime {
 
 impl PartialEq for DateTime {
     fn eq(&self, other: &Self) -> bool {
-        // The obvious implementation ends up with huge amount of binary bloat.
-        // this unsafety dropped llvm-lines by 350.
-        #[repr(C)]
-        struct Raw {
-            header: u64,
-            offset: u32,
-            nanos: i16,
-        }
-        const _: () = assert!(size_of::<Raw>() == size_of::<DateTime>());
-        const _: () = assert!(align_of::<Raw>() <= align_of::<DateTime>());
-        // SAFETY: DateTime is repr(C, align(8)) and 16 bytes (asserted
-        // above), like Raw. Raw's fields cover bytes 0..14 of DateTime: `date`
-        // (4 bytes, no padding: u16 + u8 + u8) and the four u8 fields form
-        // `header`, `nanos` is `offset`, `offset_minutes` is `nanos`. All of
-        // those bytes are initialized fields, and every bit pattern is valid
-        // for Raw's integers, so reading through `&Raw` is sound.
-        let rhs = unsafe { &*(self as *const _ as *const Raw) };
-        // SAFETY: as above.
-        let lhs = unsafe { &*(other as *const _ as *const Raw) };
-        (rhs.header == lhs.header) & (rhs.offset == lhs.offset) & (rhs.nanos == lhs.nanos)
+        // Compare packed words with non-short-circuiting `&` so the
+        // comparison stays branch-free and small.
+        (self.header_bits() == other.header_bits())
+            & (self.nanos == other.nanos)
+            & (self.offset_minutes == other.offset_minutes)
     }
 }
 
 impl Eq for DateTime {}
+
+impl DateTime {
+    /// The date, flags and clock fields packed into one word.
+    #[inline]
+    fn header_bits(&self) -> u64 {
+        u64::from(self.date.year)
+            | u64::from(self.date.month) << 16
+            | u64::from(self.date.day) << 24
+            | u64::from(self.flags) << 32
+            | u64::from(self.hour) << 40
+            | u64::from(self.minute) << 48
+            | u64::from(self.seconds) << 56
+    }
+}
 
 const HAS_DATE: u8 = 1 << 0;
 const HAS_TIME: u8 = 1 << 1;
@@ -693,42 +692,30 @@ impl DateTime {
     /// ```
     pub fn format<'a>(&self, buf: &'a mut MaybeUninit<[u8; DateTime::MAX_FORMAT_LEN]>) -> &'a str {
         #[inline(always)]
-        fn write_byte(
-            buf: &mut [MaybeUninit<u8>; DateTime::MAX_FORMAT_LEN],
-            pos: &mut usize,
-            b: u8,
-        ) {
-            buf[*pos].write(b);
+        fn write_byte(buf: &mut [u8; DateTime::MAX_FORMAT_LEN], pos: &mut usize, b: u8) {
+            buf[*pos] = b;
             *pos += 1;
         }
 
         #[inline(always)]
-        fn write_2(
-            buf: &mut [MaybeUninit<u8>; DateTime::MAX_FORMAT_LEN],
-            pos: &mut usize,
-            val: u8,
-        ) {
-            buf[*pos].write(b'0' + val / 10);
-            buf[*pos + 1].write(b'0' + val % 10);
+        fn write_2(buf: &mut [u8; DateTime::MAX_FORMAT_LEN], pos: &mut usize, val: u8) {
+            buf[*pos] = b'0' + val / 10;
+            buf[*pos + 1] = b'0' + val % 10;
             *pos += 2;
         }
 
         #[inline(always)]
-        fn write_4(
-            buf: &mut [MaybeUninit<u8>; DateTime::MAX_FORMAT_LEN],
-            pos: &mut usize,
-            val: u16,
-        ) {
-            buf[*pos].write(b'0' + (val / 1000) as u8);
-            buf[*pos + 1].write(b'0' + ((val / 100) % 10) as u8);
-            buf[*pos + 2].write(b'0' + ((val / 10) % 10) as u8);
-            buf[*pos + 3].write(b'0' + (val % 10) as u8);
+        fn write_4(buf: &mut [u8; DateTime::MAX_FORMAT_LEN], pos: &mut usize, val: u16) {
+            buf[*pos] = b'0' + (val / 1000) as u8;
+            buf[*pos + 1] = b'0' + ((val / 100) % 10) as u8;
+            buf[*pos + 2] = b'0' + ((val / 10) % 10) as u8;
+            buf[*pos + 3] = b'0' + (val % 10) as u8;
             *pos += 4;
         }
 
         #[inline(always)]
         fn write_frac(
-            buf: &mut [MaybeUninit<u8>; DateTime::MAX_FORMAT_LEN],
+            buf: &mut [u8; DateTime::MAX_FORMAT_LEN],
             pos: &mut usize,
             nanos: u32,
             digit_count: u8,
@@ -736,7 +723,7 @@ impl DateTime {
             let mut val = nanos;
             let mut i: usize = 8;
             loop {
-                buf[*pos + i].write(b'0' + (val % 10) as u8);
+                buf[*pos + i] = b'0' + (val % 10) as u8;
                 val /= 10;
                 if i == 0 {
                     break;
@@ -746,12 +733,8 @@ impl DateTime {
             *pos += digit_count as usize;
         }
 
-        // SAFETY: MaybeUninit<u8> has identical layout to u8
-        let buf: &mut [MaybeUninit<u8>; Self::MAX_FORMAT_LEN] = unsafe {
-            &mut *buf
-                .as_mut_ptr()
-                .cast::<[MaybeUninit<u8>; Self::MAX_FORMAT_LEN]>()
-        };
+        // Zeroing 40 bytes is cheaper than tracking initialization.
+        let buf: &mut [u8; Self::MAX_FORMAT_LEN] = buf.write([0; Self::MAX_FORMAT_LEN]);
         let mut pos: usize = 0;
 
         if self.flags & HAS_DATE != 0 {
@@ -798,11 +781,8 @@ impl DateTime {
             }
         }
 
-        // SAFETY: buf[..pos] has been fully initialized by the write calls above,
-        // and all written bytes are valid ASCII digits/punctuation.
-        unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(buf.as_ptr().cast(), pos))
-        }
+        // Only ASCII digits and punctuation were written.
+        std::str::from_utf8(&buf[..pos]).unwrap_or_default()
     }
 
     /// Returns the date component, or [`None`] for a local-time value.

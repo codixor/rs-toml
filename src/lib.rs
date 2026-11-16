@@ -180,14 +180,17 @@
 //! See [`Formatting`] for indentation, format preservation, and other options.
 //!
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
-mod arena;
+use raw::arena;
 mod de;
 mod emit;
 mod error;
 pub mod helper;
 mod item;
 mod parser;
+#[allow(unsafe_code)]
+mod raw;
 mod ser;
 mod span;
 mod time;

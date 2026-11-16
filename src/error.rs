@@ -1,6 +1,5 @@
 #![allow(clippy::question_mark)]
 
-use crate::Item;
 use crate::{Key, Span};
 use std::fmt::{self, Debug, Display};
 
@@ -80,170 +79,7 @@ fn is_bare_key(key: &str) -> bool {
     true
 }
 
-pub(crate) struct MaybeTomlPath {
-    ptr: std::ptr::NonNull<PathComponent<'static>>,
-    len: u32,
-    size: u32,
-}
-
-impl MaybeTomlPath {
-    pub(crate) fn empty() -> Self {
-        MaybeTomlPath {
-            ptr: std::ptr::NonNull::dangling(),
-            len: u32::MAX,
-            size: 0,
-        }
-    }
-
-    pub(crate) fn has_path(&self) -> bool {
-        self.size > 0
-    }
-
-    pub(crate) fn from_components(components: &[PathComponent<'_>]) -> MaybeTomlPath {
-        if components.is_empty() {
-            return Self::empty();
-        }
-
-        let len = components.len();
-        let mut total_string_bytes: usize = 0;
-        for comp in components {
-            if let PathComponent::Key(key) = comp {
-                total_string_bytes += key.name.len();
-            }
-        }
-
-        let comp_size = len * std::mem::size_of::<PathComponent<'static>>();
-        let size = comp_size + total_string_bytes;
-
-        // SAFETY: size > 0 because len >= 1 and size_of::<PathComponent>() > 0.
-        let layout = std::alloc::Layout::from_size_align(
-            size,
-            std::mem::align_of::<PathComponent<'static>>(),
-        )
-        .unwrap();
-        // SAFETY: layout has non-zero size
-        let raw = unsafe { std::alloc::alloc(layout) };
-        if raw.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-
-        let base = raw.cast::<PathComponent<'static>>();
-        // SAFETY: `raw` is an allocation of `size = comp_size +
-        // total_string_bytes` bytes, so `raw + comp_size` is in bounds (or
-        // one past the end when there are no key bytes).
-        let mut string_cursor = unsafe { raw.add(comp_size) };
-
-        for (i, comp) in components.iter().enumerate() {
-            let stored = match comp {
-                PathComponent::Key(key) => {
-                    let name_bytes = key.name.as_bytes();
-                    let name_len = name_bytes.len();
-                    // SAFETY: string_cursor points into the trailing region we allocated
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), string_cursor, name_len);
-                    }
-                    // SAFETY: we just wrote valid UTF-8 bytes here
-                    let name: &'static str = unsafe {
-                        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                            string_cursor,
-                            name_len,
-                        ))
-                    };
-                    // SAFETY: the trailing region holds the sum of all key
-                    // lengths; advancing past this key stays in bounds (at
-                    // most one past the end after the last key).
-                    string_cursor = unsafe { string_cursor.add(name_len) };
-                    PathComponent::Key(Key {
-                        name,
-                        span: key.span,
-                    })
-                }
-                PathComponent::Index(idx) => PathComponent::Index(*idx),
-            };
-            // SAFETY: we allocated space for `len` PathComponents
-            unsafe {
-                base.add(i).write(stored);
-            }
-        }
-
-        MaybeTomlPath {
-            // SAFETY: raw was checked non-null above
-            ptr: unsafe { std::ptr::NonNull::new_unchecked(base) },
-            len: len as u32,
-            size: size as u32,
-        }
-    }
-    #[inline(always)]
-    pub(crate) fn uncomputed(item_ptr: *const Item<'_>) -> Self {
-        MaybeTomlPath {
-            // SAFETY: item_ptr is non-null (points to an Item on the stack or in the arena).
-            // We store it cast to PathComponent just to reuse the ptr field.
-            ptr: unsafe {
-                std::ptr::NonNull::new_unchecked(item_ptr as *mut PathComponent<'static>)
-            },
-            len: 0,
-            size: 0,
-        }
-    }
-
-    pub(crate) fn is_uncomputed(&self) -> bool {
-        self.size == 0 && self.len != u32::MAX
-    }
-
-    /// The address recorded by [`uncomputed`](Self::uncomputed). Callers
-    /// only compare its address; it must never be dereferenced.
-    pub(crate) fn uncomputed_ptr(&self) -> *const () {
-        self.ptr.as_ptr() as *const ()
-    }
-
-    fn as_toml_path<'a>(&'a self) -> Option<&'a TomlPath<'a>> {
-        if !self.has_path() {
-            return None;
-        }
-        // SAFETY: components live in the allocation, strings point into
-        // the same allocation. The returned TomlPath borrows self, so the
-        // inner 'static is shortened to 'a, preventing it from escaping.
-        let slice = unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize) };
-        // SAFETY: `TomlPath` is `#[repr(transparent)]` over
-        // `[PathComponent]`, so the cast keeps layout and metadata (length).
-        Some(unsafe { &*(slice as *const [PathComponent<'static>] as *const TomlPath<'a>) })
-    }
-}
-
-impl Drop for MaybeTomlPath {
-    fn drop(&mut self) {
-        let size = self.size as usize;
-        if size > 0 {
-            let layout = std::alloc::Layout::from_size_align(
-                size,
-                std::mem::align_of::<PathComponent<'static>>(),
-            )
-            .unwrap();
-            // SAFETY: ptr was allocated with this layout
-            unsafe {
-                std::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
-            }
-        }
-    }
-}
-
-// SAFETY: `MaybeTomlPath` is in one of three states:
-// - empty (`len == u32::MAX`): `ptr` is dangling and never used.
-// - computed (`size > 0`): `ptr` is a heap allocation owned exclusively by
-//   this value (component array plus the key bytes it points into); it is
-//   freed only in `Drop` and read only through `&self`, so moving it to
-//   another thread or sharing `&self` is like doing so with a `Box<[u8]>`.
-// - uncomputed (`size == 0`, `len == 0`): `ptr` is the address of an
-//   `Item` borrowed from a parsed tree. It is NOT owned and may dangle once
-//   the arena is gone. It is never dereferenced: `as_toml_path` and `Drop`
-//   ignore it (`has_path()` and `size > 0` are false), and the only reader,
-//   `uncomputed_ptr`, feeds plain address (`usize`) comparisons in
-//   `de::compute_paths` and `helper`. An address carries no
-//   thread affinity, so sending or sharing it cannot cause a data race.
-unsafe impl Send for MaybeTomlPath {}
-// SAFETY: see `Send` above; `&MaybeTomlPath` only allows reading the owned
-// allocation or copying the opaque address.
-unsafe impl Sync for MaybeTomlPath {}
+pub(crate) use crate::raw::path::MaybeTomlPath;
 
 /// A single error from parsing or converting a TOML document.
 ///
@@ -658,8 +494,9 @@ fn push_u32(out: &mut String, mut n: u32) {
         buf[i] = b'0' + (n % 10) as u8;
         n /= 10;
     }
-    // SAFETY: digits are always valid ASCII/UTF-8
-    s_push(out, unsafe { std::str::from_utf8_unchecked(&buf[i..]) });
+    for &digit in &buf[i..] {
+        s_push_char(out, char::from(digit));
+    }
 }
 
 fn kind_message_inner(kind: ErrorKind<'_>, out: &mut String) {
@@ -886,10 +723,9 @@ fn push_unicode_escape(out: &mut String, n: u32) {
             b'A' + nibble - 10
         };
     }
-    // SAFETY: hex digits are valid ASCII
-    s_push(out, unsafe {
-        std::str::from_utf8_unchecked(&buf[..digits])
-    });
+    for &digit in &buf[..digits] {
+        s_push_char(out, char::from(digit));
+    }
 }
 
 impl Error {

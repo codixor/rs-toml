@@ -1,15 +1,12 @@
 use crate::emit::partition::ensure_body_order;
 use crate::{Array, ArrayStyle, Item, Kind, Table, TableStyle, Value, ValueMut};
 impl<'de> Table<'de> {
-    fn normalize_inner(&mut self) -> &NormalizedTable<'de> {
+    fn normalize_inner(&mut self) -> NormalizedTable<'_, 'de> {
         normalize_entries(self.value.entries_mut(), true);
         ensure_body_order(self.value.entries_mut());
-        // SAFETY: NormalizedTable is #[repr(transparent)] over Table, so the
-        // cast preserves layout. The normalize_item calls above have ensured
-        // every item in the tree is reachable by the emit algorithm. The
-        // NormalizedTable wrapper is a marker type that encodes this guarantee
-        // at the type level.
-        unsafe { &*(self as *const Table<'de> as *const NormalizedTable<'de>) }
+        // The normalize calls above have made every item in the tree
+        // reachable by the emit algorithm; the wrapper records that.
+        NormalizedTable(self)
     }
 
     /// Recursively corrects table and array kinds so the tree is valid
@@ -19,7 +16,7 @@ impl<'de> Table<'de> {
     /// would otherwise be unreachable, downgrades invalid
     /// array-of-tables to inline arrays, and fixes kind mismatches in
     /// nested contexts (e.g. a header table inside an inline table).
-    pub(crate) fn normalize(&mut self) -> &NormalizedTable<'de> {
+    pub(crate) fn normalize(&mut self) -> NormalizedTable<'_, 'de> {
         self.normalize_inner()
     }
 
@@ -30,30 +27,30 @@ impl<'de> Table<'de> {
     /// `None` otherwise. Use [`normalize`](Self::normalize) to fix an
     /// invalid tree instead.
     #[allow(dead_code)]
-    pub(crate) fn try_as_normalized(&self) -> Option<&NormalizedTable<'de>> {
+    pub(crate) fn try_as_normalized(&self) -> Option<NormalizedTable<'_, 'de>> {
         if is_valid(self, true) {
-            // SAFETY: NormalizedTable is #[repr(transparent)] over Table.
             // The validation confirmed the tree is emit-safe.
-            Some(unsafe { &*(self as *const Table<'de> as *const NormalizedTable<'de>) })
+            Some(NormalizedTable(self))
         } else {
             None
         }
     }
 }
 
-#[repr(transparent)]
-pub(crate) struct NormalizedTable<'de>(Table<'de>);
+/// A table known to be valid for emission (every item reachable).
+#[derive(Clone, Copy)]
+pub(crate) struct NormalizedTable<'a, 'de>(&'a Table<'de>);
 
-impl<'de> NormalizedTable<'de> {
-    pub(crate) fn table(&self) -> &Table<'de> {
-        &self.0
+impl<'a, 'de> NormalizedTable<'a, 'de> {
+    pub(crate) fn table(self) -> &'a Table<'de> {
+        self.0
     }
 }
 
-impl<'de> std::ops::Deref for NormalizedTable<'de> {
+impl<'de> std::ops::Deref for NormalizedTable<'_, 'de> {
     type Target = Table<'de>;
     fn deref(&self) -> &Table<'de> {
-        &self.0
+        self.0
     }
 }
 
@@ -97,7 +94,7 @@ fn normalize_inline(item: &mut Item<'_>, allow_dotted: bool) {
 #[allow(dead_code)]
 fn is_valid(table: &Table<'_>, body_emitted: bool) -> bool {
     for (_, item) in table {
-        if item.meta.is_auto_style() {
+        if item.meta().is_auto_style() {
             return false;
         }
         if item.has_dotted_bit() {
@@ -160,10 +157,10 @@ fn is_small_value(item: &Item<'_>) -> bool {
 }
 
 fn resolve_auto_table(sub: &mut Table<'_>, body_emitted: bool) {
-    if !sub.meta.is_auto_style() {
+    if !sub.meta().is_auto_style() {
         return;
     }
-    sub.meta.clear_auto_style();
+    sub.meta_mut().clear_auto_style();
     if !body_emitted {
         return;
     }
@@ -205,10 +202,10 @@ fn inline_width(item: &Item<'_>) -> Option<usize> {
 }
 
 fn resolve_auto_array(arr: &mut Array<'_>) {
-    if !arr.meta.is_auto_style() {
+    if !arr.meta().is_auto_style() {
         return;
     }
-    arr.meta.clear_auto_style();
+    arr.meta_mut().clear_auto_style();
 
     if arr.is_empty() {
         arr.set_style(ArrayStyle::Inline);

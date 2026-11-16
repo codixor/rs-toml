@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 - 2026-11-16
+
+### Changed
+- `unsafe` is confined to the internal `src/raw/` module (arena, arena
+  vector, item payload union and layout casts, owned error paths, shallow
+  flatten copies, ASCII text fast path). The crate root is
+  `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]` only on `mod raw`;
+  `scripts/check-unsafe.sh` enforces this in CI. Every function in `raw`
+  that is not `unsafe fn` is sound for any arguments.
+- `unsafe` occurrences: about 165 across 14 files in 0.2.0, 87 in 6 files
+  under `src/raw/` in 0.3.0. Parser fast paths, emit prefixes, partitioning,
+  normalization, time parsing, error formatting and serde helpers are now
+  safe code.
+- `rs-toml-macros` is `#![forbid(unsafe_code)]`.
+- Performance against 0.2.0 (criterion, paired runs on a shared machine):
+  parsing 0-44% faster depending on run; emit, serde and derive benchmarks
+  within run-to-run noise (a per-commit bisect found no step slower than
+  0.2.0).
+
+### Fixed
+- Error path construction checks its size before narrowing to `u32`.
+
 ## 0.2.0 - 2026-11-16
 
 ### Added

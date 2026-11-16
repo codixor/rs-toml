@@ -160,30 +160,14 @@ pub struct TableHelper<'ctx, 'table, 'de> {
     table_id: i32,
     // Used for detecting unused fields or iterating over remaining for flatten into collection.
     used_count: u32,
-    used: &'de mut FixedBitset,
+    used: FixedBitset<'de>,
 }
 
-#[repr(transparent)]
-struct FixedBitset([u64]);
+struct FixedBitset<'a>(&'a mut [u64]);
 
-impl FixedBitset {
-    #[allow(clippy::mut_from_ref)]
-    pub fn new(capacity: usize, arena: &Arena) -> &mut FixedBitset {
-        let bitset_bucket_count = capacity.div_ceil(64);
-        let bitset = arena
-            .alloc(bitset_bucket_count * std::mem::size_of::<u64>())
-            .cast::<u64>();
-        for offset in 0..bitset_bucket_count {
-            // SAFETY: `bitset_len * size_of::<u64>()` bytes were allocated above,
-            // so `bitset.add(offset)` for offset in 0..bitset_len is within bounds.
-            unsafe {
-                bitset.add(offset).write(0);
-            }
-        }
-        // SAFETY: bitset points to `bitset_len` initialized u64 values in the arena.
-        let slice = unsafe { std::slice::from_raw_parts_mut(bitset.as_ptr(), bitset_bucket_count) };
-        // SAFETY: FixedBitset is #[repr(transparent)] over [u64].
-        unsafe { &mut *(slice as *mut [u64] as *mut FixedBitset) }
+impl<'a> FixedBitset<'a> {
+    pub fn new(capacity: usize, arena: &'a Arena) -> FixedBitset<'a> {
+        FixedBitset(arena.alloc_filled(capacity.div_ceil(64), 0u64))
     }
 
     pub fn insert(&mut self, index: usize) -> bool {
@@ -248,7 +232,7 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
     /// Prefer [`Item::table_helper`] inside [`FromToml`] implementations, or
     /// [`Document::table_helper`](crate::Document::table_helper) for the root table.
     pub fn new(ctx: &'ctx mut Context<'de>, table: &'t Table<'de>) -> Self {
-        let table_id = if table.len() > INDEXED_TABLE_THRESHOLD && table.meta.is_span_mode() {
+        let table_id = if table.len() > INDEXED_TABLE_THRESHOLD && table.meta().is_span_mode() {
             table.entries()[0].0.span.start as i32
         } else {
             -1
@@ -393,17 +377,11 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
         let Some(entry) = self.get_entry(key) else {
             return None;
         };
-        // SAFETY: `entry` was returned by get_entry(), which either performs a
-        // linear scan of self.table.entries() or indexes into that same slice
-        // via the hash index. In both cases `entry` points to an element within
-        // the slice whose base pointer is `base`. offset_from is valid because
-        // both pointers derive from the same allocation and the result is a
-        // non-negative element index (< table.len()).
-        let index = unsafe {
-            let ptr = entry as *const (Key<'de>, Item<'de>);
-            let base = self.table.entries().as_ptr();
-            ptr.offset_from(base) as usize
-        };
+        // `entry` is an element of `self.table.entries()` (get_entry scans
+        // or indexes that slice), so its address offset is its index.
+        let base = self.table.entries().as_ptr().addr();
+        let index = (std::ptr::from_ref(entry).addr() - base)
+            / std::mem::size_of::<(Key<'de>, Item<'de>)>();
         if self.used.insert(index) {
             self.used_count += 1;
         }
@@ -463,7 +441,8 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
     /// Iterate over unused `&(Key<'de>, Item<'de>)` entries in the table.
     pub fn into_remaining(self) -> RemainingEntriesIter<'t, 'de> {
         let entries = self.table.entries();
-        let mut remaining_cells = self.used.0.iter();
+        let words: &'de [u64] = self.used.0;
+        let mut remaining_cells = words.iter();
         RemainingEntriesIter {
             bits: if let Some(value) = remaining_cells.next() {
                 !*value

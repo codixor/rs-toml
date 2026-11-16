@@ -33,6 +33,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo fmt --all -- --check
+      - run: bash scripts/check-unsafe.sh
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
       - run: cargo test --workspace --no-default-features --locked

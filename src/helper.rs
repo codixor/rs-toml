@@ -1,7 +1,5 @@
 //! Contains submodules for use with the `#[toml(with = ...)]` field attribute.
 
-use crate::{Item, Table};
-
 /// Converts a TOML string value into any type implementing [`FromStr`].
 ///
 /// Pair with the `with` field attribute to store types like [`IpAddr`] or
@@ -99,19 +97,7 @@ pub mod display {
     }
 }
 
-#[doc(hidden)]
-pub struct ShallowTable<'de, 'b> {
-    table: Table<'de>,
-    // Table accumulates Items from the parent table and makes bitwise copies
-    // to comply with the regular interface of FromToml. Done naively this would
-    // be unsound, because collections like `Array` or similarly to `&mut [Array]`
-    // they might not be Drop, but they are owned.
-    // However, the marker below ensures that Item remains shared throughout the
-    // lifetime of ShallowTable, and ShallowTable itself only uses the Items as
-    // shared references. Finally, the use of raw pointers in implementing Item
-    // imply no alias restrictions while dormant.
-    __marker: std::marker::PhantomData<&'b Item<'de>>,
-}
+pub use crate::raw::shallow::ShallowTable;
 
 /// Flattens any type implementing [`FromToml`] or [`ToToml`] into a parent
 /// struct without a [`FromFlattened`] or [`ToFlattened`] implementation.
@@ -179,7 +165,7 @@ pub mod flatten_any {
         parent: &Table<'de>,
         partial: &ShallowTable<'de, 'b>,
     ) {
-        let entries = partial.table.entries();
+        let entries = partial.table().entries();
         let entry_size = std::mem::size_of::<(Key<'_>, Item<'_>)>();
         // Compare plain addresses: recorded error pointers may have any
         // provenance, so they are never offset or dereferenced.
@@ -199,8 +185,7 @@ pub mod flatten_any {
         let index = if parent.span().is_empty() {
             if parent.len() > 8 && errors.len() > 2 {
                 temporary_index = foldhash::HashMap::with_capacity(parent.len());
-                // Safety: length is greater the 8, thus more then 0
-                let table_id = unsafe { parent.value.first_key_span_start_unchecked() };
+                let table_id = parent.value.first_key_span_start();
                 let mut i = 0;
                 for (key, _) in parent.entries() {
                     temporary_index.insert(KeyRef::new(key.name, table_id), i);
@@ -239,10 +224,7 @@ pub mod flatten_any {
 
     /// Creates an empty accumulator for collecting flattened entries.
     pub fn init<'a, 'b>() -> ShallowTable<'a, 'b> {
-        ShallowTable {
-            table: Table::new(),
-            __marker: std::marker::PhantomData,
-        }
+        ShallowTable::new()
     }
 
     /// Inserts a single key-value pair into the accumulator.
@@ -252,15 +234,7 @@ pub mod flatten_any {
         item: &'b Item<'de>,
         partial: &mut ShallowTable<'de, 'b>,
     ) -> Result<(), Failed> {
-        // SAFETY: Item has no Drop impl. The bitwise copy shares
-        // internal table/array pointers with the original. This is safe because:
-        // - The arena never frees, so all pointed-to data remains valid for 'de
-        // - The 'b lifetime keeps the original immutably borrowed, preventing
-        //   mutation of shared backing storage while the ShallowTable exists
-        // - finish() passes the shallow table to FromToml::from_toml(&Item),
-        //   which only reads through shared references
-        let shallow = unsafe { std::ptr::read(item) };
-        partial.table.insert_unique(*key, shallow, ctx.arena);
+        partial.insert(*key, item, ctx.arena);
         Ok(())
     }
 
@@ -271,7 +245,7 @@ pub mod flatten_any {
         partial: ShallowTable<'de, 'b>,
     ) -> Result<T, Failed> {
         let original = ctx.errors.len();
-        let result = T::from_toml(ctx, partial.table.as_item());
+        let result = T::from_toml(ctx, partial.table().as_item());
         if ctx.errors.len() > original {
             patch_errors(ctx, original, parent, &partial);
         }
