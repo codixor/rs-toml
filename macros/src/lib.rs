@@ -79,7 +79,9 @@ impl Error {
             Ok(e) => e,
             Err(err) => {
                 if let Some(Thrown(message)) = err.downcast_ref::<Thrown>() {
-                    let span = THROWN_SPAN.with(|slot| slot.take()).unwrap_or_else(Span::call_site);
+                    let span = THROWN_SPAN
+                        .with(|slot| slot.take())
+                        .unwrap_or_else(Span::call_site);
                     Error(InnerError {
                         span,
                         message: message.clone(),

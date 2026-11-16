@@ -7,8 +7,8 @@
 //! `raw`; every function here is safe to call with any arguments.
 
 use crate::Item;
-use crate::error::{PathComponent, TomlPath};
 use crate::Key;
+use crate::error::{PathComponent, TomlPath};
 use std::ptr::NonNull;
 
 pub(crate) struct MaybeTomlPath {
