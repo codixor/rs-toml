@@ -7,7 +7,7 @@ Details live in `docs/agents/`; read the linked file when a step needs it.
 ## Rust project
 
 Rust application managed with Cargo. Use the toolchain pinned in
-`rust-toolchain.toml` (1.99.1). `rs-toml` is a pure-Rust TOML parser and emitter with
+`rust-toolchain.toml` (1.100.0). `rs-toml` is a pure-Rust TOML parser and emitter with
 span-preserving document access, derived from upstream `toml-spanner`; `macros/`
 holds the optional derive crate and `diver/` is upstream tooling outside the
 workspace build.
