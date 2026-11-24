@@ -142,3 +142,5 @@ toml-test tooling; it is not part of the workspace build.
 ## Releases
 
 Bump the workspace version and the derive dependency together. Pushes to `main` run CI and conformance checks only. To publish, push a `v<version>` tag that matches the workspace version. After the tagged commit passes both checks, the `cratesio` environment publishes `rs-toml-macros` first, then `rs-toml`. The workflow creates the GitHub release for that tag. A retry skips any workspace member already published.
+
+On main and version tags, CI runs the pinned nextest runner and checks API compatibility against the highest eligible non-yanked version of `rs-toml` on crates.io. On main, the published version matching the workspace version is eligible. For a tag, the baseline must be strictly older, including on a retry.

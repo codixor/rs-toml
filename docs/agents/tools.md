@@ -17,9 +17,9 @@ Install once per machine. The gate uses a tool when present and prints
 | `bacon` / `cargo-watch` | re-check on save | coder |
 | `sccache` | shared build cache | local, CI |
 
-Install the missing gate tools:
+Install the project-pinned nextest and cargo-semver-checks with `mise install`. To install additional gate tools:
 
 ```sh
-cargo install --locked cargo-machete cargo-hack cargo-semver-checks
+cargo install --locked cargo-machete cargo-hack
 rustup toolchain install nightly --component miri
 ```

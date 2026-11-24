@@ -31,11 +31,36 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Install project-pinned Cargo tools
+        if: github.event_name == 'push'
+        uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          version: 2026.11.7
+          install_args: github:nextest-rs/nextest github:obi1kenobi/cargo-semver-checks
       - run: cargo fmt --all -- --check
       - run: bash scripts/check-unsafe.sh
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --workspace --all-features --locked
-      - run: cargo test --workspace --no-default-features --locked
+      - name: Run workspace tests and doctests (pull request)
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo test --workspace --all-features --locked
+          cargo test --workspace --no-default-features --locked
+      - name: Run nextest and doctests (main and version tags)
+        if: github.event_name == 'push'
+        run: |
+          cargo nextest --version
+          for features in --all-features --no-default-features; do
+            cargo nextest run --workspace "$features" --locked
+            cargo test --workspace "$features" --locked --doc
+          done
+      - name: Check API compatibility against the previous release
+        if: github.event_name == 'push'
+        run: |
+          cargo semver-checks --version
+          python3 -m unittest discover -s scripts -p test_semver_baseline.py
+          baseline=$(python3 scripts/semver_baseline.py)
+          echo "crates.io baseline: rs-toml $baseline"
+          cargo semver-checks --workspace --baseline-version "$baseline"
       - run: cargo check --workspace --benches --locked
 
   miri:

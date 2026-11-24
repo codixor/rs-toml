@@ -2,6 +2,17 @@
 [tools]
 "npm:ecc-agentshield" = "1.6.0"
 
+[tools."github:nextest-rs/nextest"]
+version = "0.9.152"
+version_prefix = "cargo-nextest-"
+platforms.linux-x64.asset_pattern = "*-x86_64-unknown-linux-gnu.tar.gz"
+platforms.windows-x64.asset_pattern = "*-x86_64-pc-windows-msvc.zip"
+
+[tools."github:obi1kenobi/cargo-semver-checks"]
+version = "0.51.0"
+platforms.linux-x64.asset_pattern = "*-x86_64-unknown-linux-gnu.tar.gz"
+platforms.windows-x64.asset_pattern = "*-x86_64-pc-windows-msvc.zip"
+
 [tasks.gate]
 description = "Pre-CI gate (AGENTS.md steps 3-7): fmt, clippy, tests, dependency/feature/API/unsafe checks"
 run = "bash scripts/gate.sh"
