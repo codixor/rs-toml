@@ -1,0 +1,2 @@
+# Preserve the exact input bytes and offsets in parser and emitter fixtures.
+tests/**/*.toml text eol=lf

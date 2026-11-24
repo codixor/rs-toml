@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-11-24
+
+- Automate coordinated publication of the derive crate and parser after CI and conformance pass.
+
 ## 0.3.0 - 2026-11-16
 
 ### Changed

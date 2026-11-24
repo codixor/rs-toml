@@ -138,3 +138,7 @@ truth are [`benches/toml_core.rs`](./benches/toml_core.rs),
 upstream, under either of [Apache License 2.0](LICENSE-APACHE) or
 [MIT](LICENSE-MIT) at your option. `diver/` holds upstream's benchmark and
 toml-test tooling; it is not part of the workspace build.
+
+## Releases
+
+Bump the workspace version and the derive dependency together. Pushing to `main` or pushing a matching `v<version>` tag runs CI and conformance checks. The `cratesio` environment publishes `rs-toml-macros` first, then `rs-toml`, followed by the GitHub release. A retry skips any workspace member already published.
