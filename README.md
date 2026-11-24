@@ -141,4 +141,4 @@ toml-test tooling; it is not part of the workspace build.
 
 ## Releases
 
-Bump the workspace version and the derive dependency together. Pushing to `main` or pushing a matching `v<version>` tag runs CI and conformance checks. The `cratesio` environment publishes `rs-toml-macros` first, then `rs-toml`, followed by the GitHub release. A retry skips any workspace member already published.
+Bump the workspace version and the derive dependency together. Pushes to `main` run CI and conformance checks only. To publish, push a `v<version>` tag that matches the workspace version. After the tagged commit passes both checks, the `cratesio` environment publishes `rs-toml-macros` first, then `rs-toml`. The workflow creates the GitHub release for that tag. A retry skips any workspace member already published.
