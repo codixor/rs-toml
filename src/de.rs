@@ -13,7 +13,6 @@ use foldhash::HashMap;
 use std::fmt::Debug;
 
 use crate::Value;
-use crate::error::ErrorInner;
 use crate::{
     Arena, Key, Span, Table,
     error::{Error, ErrorKind, MaybeTomlPath, PathComponent},
@@ -69,7 +68,8 @@ fn compute_paths_walk<'de>(
                     let byte_offset = ptr - base;
                     let entry_index = byte_offset / entry_size;
                     if entry_index < entries.len() {
-                        path_stack[path_depth] = PathComponent::Key(entries[entry_index].0);
+                        path_stack[path_depth] =
+                            PathComponent::redacted_key(entries[entry_index].0);
                         **path = MaybeTomlPath::from_components(&path_stack[..path_depth + 1]);
                         pending.swap_remove(i);
                         continue;
@@ -79,7 +79,7 @@ fn compute_paths_walk<'de>(
             }
 
             for (key, child) in table {
-                path_stack[path_depth] = PathComponent::Key(*key);
+                path_stack[path_depth] = PathComponent::redacted_key(*key);
                 compute_paths_walk(child, pending, path_stack, path_depth + 1);
             }
         }
@@ -475,11 +475,11 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
         let mut had_unexpected = false;
         for (i, (key, item)) in self.table.entries().iter().enumerate() {
             if !self.used.get(i) {
-                self.ctx.errors.push(Error {
-                    kind: ErrorInner::Static(ErrorKind::UnexpectedKey { tag: 0 }),
-                    span: key.span,
-                    path: MaybeTomlPath::uncomputed(item),
-                });
+                self.ctx.errors.push(Error::new_with_path(
+                    ErrorKind::UnexpectedKey { tag: 0 },
+                    key.span,
+                    MaybeTomlPath::uncomputed(item),
+                ));
 
                 had_unexpected = true;
             }
@@ -826,14 +826,9 @@ impl<'de, T: FromToml<'de>, const N: usize> FromToml<'de> for [T; N] {
         let boxed_slice = Box::<[T]>::from_toml(ctx, value)?;
         match <Box<[T; N]>>::try_from(boxed_slice) {
             Ok(array) => Ok(*array),
-            Err(res) => Err(ctx.push_error(Error::custom(
-                format!(
-                    "expected an array with a size of {}, found one with a size of {}",
-                    N,
-                    res.len()
-                ),
-                value.span_unchecked(),
-            ))),
+            Err(_) => {
+                Err(ctx.push_error(Error::new(ErrorKind::InvalidLength, value.span_unchecked())))
+            }
         }
     }
 }
@@ -844,13 +839,8 @@ macro_rules! impl_from_toml_tuple {
             fn from_toml(ctx: &mut Context<'de>, value: &Item<'de>) -> Result<Self, Failed> {
                 let arr = value.require_array(ctx)?;
                 if arr.len() != $len {
-                    return Err(ctx.push_error(Error::custom(
-                        format!(
-                            "expected an array with a size of {}, found one with a size of {}",
-                            $len,
-                            arr.len()
-                        ),
-                        value.span_unchecked(),
+                    return Err(ctx.push_error(Error::new(
+                        ErrorKind::InvalidLength, value.span_unchecked(),
                     )));
                 }
                 let slice = arr.as_slice();
@@ -1246,6 +1236,17 @@ impl<'de> Item<'de> {
 pub struct FromTomlError {
     /// The accumulated errors.
     pub errors: Vec<Error>,
+}
+
+impl crate::FormatError for FromTomlError {
+    fn category(&self) -> crate::Category {
+        self.errors
+            .first()
+            .map_or(crate::Category::Data, crate::FormatError::category)
+    }
+    fn position(&self) -> Option<crate::Position> {
+        self.errors.first().and_then(crate::FormatError::position)
+    }
 }
 
 fn from_toml_error_summary(errors: &[Error]) -> String {

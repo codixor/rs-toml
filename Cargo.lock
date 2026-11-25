@@ -484,8 +484,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rs-format"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0923a90fc8c06ff3e4e3b8b96b2b738ed3019c9d8a6b9ea0ce259f17fa68dc38"
+
+[[package]]
 name = "rs-toml"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anstream",
  "anstyle-svg",
@@ -493,6 +499,7 @@ dependencies = [
  "foldhash",
  "oorandom",
  "pretty_assertions",
+ "rs-format",
  "rs-toml-macros",
  "serde",
  "thiserror",
@@ -502,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "rs-toml-macros"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "rustversion"

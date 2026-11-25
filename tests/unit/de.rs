@@ -323,7 +323,7 @@ fn deser_boxed_and_array_types() {
 
     // [T; N] wrong size
     let err = parse_val::<[i64; 2]>("v = [1, 2, 3]", &arena).unwrap_err();
-    assert!(matches!(err.kind(), crate::ErrorKind::Custom(_)));
+    assert!(matches!(err.kind(), crate::ErrorKind::InvalidLength));
 
     // &str and Cow<str> wrong type errors
     let err = parse_val::<&str>("v = 42", &arena).unwrap_err();
@@ -1143,10 +1143,7 @@ unknown_field = true
         ErrorKind::UnexpectedKey { .. }
     ));
     assert!(doc.ctx.errors[0].path().is_some());
-    assert_eq!(
-        format!("{}", doc.ctx.errors[0]),
-        "unexpected key at `server.unknown_field`"
-    );
+    assert_eq!(format!("{}", doc.ctx.errors[0]), "unexpected key");
 
     // Deeply nested: array of tables with unexpected key
     let input = r#"
@@ -1171,9 +1168,9 @@ bogus = 1
     assert_eq!(doc.ctx.errors.len(), 1);
     assert!(doc.ctx.errors[0].path().is_some());
 
-    // Display includes path in error message
+    // Display omits the input path
     let display = format!("{}", doc.ctx.errors[0]);
-    assert_eq!(display, "unexpected key at `items[0].bogus`");
+    assert_eq!(display, "unexpected key");
 
     // No item means empty path (backward compat)
     let mut doc = crate::parser::parse("a = 1\nb = 2", &arena).unwrap();
@@ -1211,7 +1208,7 @@ fn deser_tuple_wrong_size() {
     let arena = Arena::new();
     let err = parse_val::<(i64, i64)>("v = [1, 2, 3]", &arena).unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("size of 2"), "got: {msg}");
+    assert_eq!(msg, "invalid array length");
 }
 
 #[test]

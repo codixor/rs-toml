@@ -122,10 +122,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "rs-format"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0923a90fc8c06ff3e4e3b8b96b2b738ed3019c9d8a6b9ea0ce259f17fa68dc38"
+
+[[package]]
 name = "rs-toml"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "foldhash",
+ "rs-format",
  "serde",
  "thiserror",
  "zmij",

@@ -309,10 +309,7 @@ impl<'de> Item<'de> {
         };
         match s.parse() {
             Ok(v) => Ok(v),
-            Err(err) => Err(Error::custom(
-                format!("failed to parse string: {err}"),
-                self.span_unchecked(),
-            )),
+            Err(err) => Err(Error::custom(err, self.span_unchecked())),
         }
     }
 }

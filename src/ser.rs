@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap},
-    fmt::Debug,
     rc::Rc,
     sync::Arc,
 };
@@ -384,33 +383,50 @@ fn length_of_table_exceeded_maximum<T>() -> Result<T, ToTomlError> {
 /// Returned by [`to_string`](crate::to_string),
 /// [`Formatting::format`](crate::Formatting::format), and
 /// [`ToToml::to_toml`].
-#[derive(Debug, thiserror::Error)]
-#[error("{message}")]
+#[derive(thiserror::Error)]
+#[error("TOML serialization failed")]
 pub struct ToTomlError {
     /// The error message.
     pub message: Cow<'static, str>,
 }
 
+impl std::fmt::Debug for ToTomlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl crate::FormatError for ToTomlError {
+    fn category(&self) -> crate::Category {
+        crate::Category::Data
+    }
+    fn position(&self) -> Option<crate::Position> {
+        None
+    }
+}
+
 impl ToTomlError {
-    /// Returns `Err(ToTomlError)` with the given static message.
+    pub(crate) fn rejected() -> Self {
+        Self {
+            message: Cow::Borrowed("TOML serialization failed"),
+        }
+    }
+
+    /// Returns a redacted serialization error.
     #[cold]
-    pub fn msg<T>(msg: &'static str) -> Result<T, Self> {
-        Err(Self {
-            message: Cow::Borrowed(msg),
-        })
+    pub fn msg<T>(_msg: &'static str) -> Result<T, Self> {
+        Err(Self::rejected())
     }
 }
 
 impl From<Cow<'static, str>> for ToTomlError {
-    fn from(message: Cow<'static, str>) -> Self {
-        Self { message }
+    fn from(_message: Cow<'static, str>) -> Self {
+        Self::rejected()
     }
 }
 
 impl From<&'static str> for ToTomlError {
-    fn from(message: &'static str) -> Self {
-        Self {
-            message: Cow::Borrowed(message),
-        }
+    fn from(_message: &'static str) -> Self {
+        Self::rejected()
     }
 }

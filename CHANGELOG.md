@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Add `parse_with`, `parse_recoverable_with`, `from_str_with` and
+  `serde::from_str_with` with inclusive `rs-format` limits. Existing entry
+  points retain their previous document and depth ceilings.
+- Implement shared diagnostic categories and positions. Native and Serde errors
+  preserve byte spans. Error messages and paths redact keys, values and custom
+  visitor text. Character and escape-value error variants now carry no payload.
+- Require Rust 1.100.0 for both workspace crates.
+
 ## 0.3.1 - 2026-11-24
 
 - Automate coordinated publication of the derive crate and parser after CI and conformance pass.

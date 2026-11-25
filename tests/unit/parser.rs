@@ -311,7 +311,7 @@ fn parse_errors() {
     assert!(matches!(e.kind(), ErrorKind::UnterminatedString('"')));
 
     let e = ctx.parse_err(r#"a = "\z""#);
-    assert!(matches!(e.kind(), ErrorKind::InvalidEscape('z')));
+    assert!(matches!(e.kind(), ErrorKind::InvalidEscape));
 
     let e = ctx.parse_err("[t]\na = 1\n[t]\nb = 2");
     assert!(matches!(e.kind(), ErrorKind::DuplicateTable { .. }));
@@ -478,13 +478,7 @@ fn recursion_depth_over_limit() {
         input.push(']');
     }
     let e = ctx.parse_err(&input);
-    assert!(matches!(
-        e.kind(),
-        ErrorKind::OutOfRange {
-            ty: &"Max recursion depth exceeded",
-            ..
-        }
-    ));
+    assert!(matches!(e.kind(), ErrorKind::DepthLimit));
 
     // Nested inline tables one past the limit
     let mut input = String::from("a = ");
@@ -496,13 +490,7 @@ fn recursion_depth_over_limit() {
         input.push('}');
     }
     let e = ctx.parse_err(&input);
-    assert!(matches!(
-        e.kind(),
-        ErrorKind::OutOfRange {
-            ty: &"Max recursion depth exceeded",
-            ..
-        }
-    ));
+    assert!(matches!(e.kind(), ErrorKind::DepthLimit));
 
     // Mixed nesting one past the limit
     let mut input = String::from("a = ");
@@ -514,13 +502,7 @@ fn recursion_depth_over_limit() {
         input.push_str("}]");
     }
     let e = ctx.parse_err(&input);
-    assert!(matches!(
-        e.kind(),
-        ErrorKind::OutOfRange {
-            ty: &"Max recursion depth exceeded",
-            ..
-        }
-    ));
+    assert!(matches!(e.kind(), ErrorKind::DepthLimit));
 }
 
 #[test]
@@ -607,7 +589,7 @@ fn crlf_handling() {
 
     let e = ctx.parse_err("a = \"hello\rworld\"");
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidCharInString('\r')),
+        matches!(e.kind(), ErrorKind::InvalidCharInString),
         "input: a = \"hello\\rworld\""
     );
 
@@ -620,7 +602,7 @@ fn crlf_handling() {
     // Bare CR in array
     let e = ctx.parse_err("a = [ \r ]");
     assert!(
-        matches!(e.kind(), ErrorKind::Unexpected('\r')),
+        matches!(e.kind(), ErrorKind::Unexpected),
         "bare CR in array: {:?}",
         e.kind(),
     );
@@ -686,13 +668,13 @@ fn escape_sequences() {
 
     let e = ctx.parse_err(r#"a = "\uGGGG""#);
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidHexEscape('G')),
+        matches!(e.kind(), ErrorKind::InvalidHexEscape),
         "input: a = \"\\uGGGG\""
     );
 
     let e = ctx.parse_err(r#"a = "\UFFFFFFFF""#);
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidEscapeValue(_)),
+        matches!(e.kind(), ErrorKind::InvalidEscapeValue),
         "input: a = \"\\UFFFFFFFF\""
     );
 
@@ -704,7 +686,7 @@ fn escape_sequences() {
 
     let e = ctx.parse_err(r#"a = "\xGG""#);
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidHexEscape('G')),
+        matches!(e.kind(), ErrorKind::InvalidHexEscape),
         "input: a = \"\\xGG\""
     );
 }
@@ -732,7 +714,7 @@ fn multiline_string_edge_cases() {
 
     let e = ctx.parse_err("a = \"\"\"\\  x\"\"\"");
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidEscape(' ')),
+        matches!(e.kind(), ErrorKind::InvalidEscape),
         "input: a = \"\"\"\\  x\"\"\""
     );
 
@@ -741,7 +723,7 @@ fn multiline_string_edge_cases() {
     // = escape ws newline, where ws = *wschar and wschar = SP / HTAB).
     let e = ctx.parse_err("a = \"\"\"\\\r\r\n\"\"\"");
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidCharInString('\r')),
+        matches!(e.kind(), ErrorKind::InvalidCharInString),
         "bare CR after line-ending backslash: {:?}",
         e.kind(),
     );
@@ -908,7 +890,7 @@ fn structural_errors() {
 
     // DEL character in string
     let e = ctx.parse_err("a = \"hello\x7Fworld\"");
-    assert!(matches!(e.kind(), ErrorKind::InvalidCharInString(_)));
+    assert!(matches!(e.kind(), ErrorKind::InvalidCharInString));
 }
 
 #[test]
@@ -1047,11 +1029,11 @@ fn more_parse_errors() {
 
     // expected value found ]
     let e = ctx.parse_err("a = ]");
-    assert!(matches!(e.kind(), ErrorKind::Unexpected(']')));
+    assert!(matches!(e.kind(), ErrorKind::Unexpected));
 
     // expected value found }
     let e = ctx.parse_err("a = }");
-    assert!(matches!(e.kind(), ErrorKind::Unexpected('}')));
+    assert!(matches!(e.kind(), ErrorKind::Unexpected));
 
     // dash-leading invalid number
     let e = ctx.parse_err("a = -_bad");
@@ -1069,7 +1051,7 @@ fn more_parse_errors() {
     let e = ctx.parse_err("a = 1\r");
     assert!(matches!(
         e.kind(),
-        ErrorKind::Wanted { .. } | ErrorKind::Unexpected('\r')
+        ErrorKind::Wanted { .. } | ErrorKind::Unexpected
     ));
 
     // missing closing bracket in table header
@@ -1308,13 +1290,13 @@ fn error_messages_and_spans() {
 
     // Unexpected characters in value position
     let e = ctx.parse_err("a = .1");
-    assert!(matches!(e.kind(), ErrorKind::Unexpected('.')));
+    assert!(matches!(e.kind(), ErrorKind::Unexpected));
 
     let e = ctx.parse_err("a = ]");
-    assert!(matches!(e.kind(), ErrorKind::Unexpected(']')));
+    assert!(matches!(e.kind(), ErrorKind::Unexpected));
 
     let e = ctx.parse_err("a = }");
-    assert!(matches!(e.kind(), ErrorKind::Unexpected('}')));
+    assert!(matches!(e.kind(), ErrorKind::Unexpected));
 
     // Unquoted strings
     let e = ctx.parse_err("a = hello");
@@ -1636,13 +1618,13 @@ fn parse_document_error_paths() {
     // Bare CR at top level (not in comment or string)
     let e = ctx.parse_err("\r");
     assert!(
-        matches!(e.kind(), ErrorKind::Unexpected('\r')),
+        matches!(e.kind(), ErrorKind::Unexpected),
         "input: bare CR at document top level"
     );
 
     let e = ctx.parse_err("a = 1\n\r");
     assert!(
-        matches!(e.kind(), ErrorKind::Unexpected('\r')),
+        matches!(e.kind(), ErrorKind::Unexpected),
         "input: bare CR after newline at document top level"
     );
 }
@@ -1878,7 +1860,7 @@ fn backslash_whitespace_in_nonmultiline_string() {
     // Backslash followed by space in a non-multiline basic string is an error.
     let e = ctx.parse_err("a = \"hello\\ world\"");
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidEscape(' ')),
+        matches!(e.kind(), ErrorKind::InvalidEscape),
         "backslash-space in basic string: {:?}",
         e.kind()
     );
@@ -1886,7 +1868,7 @@ fn backslash_whitespace_in_nonmultiline_string() {
     // Backslash followed by tab in a non-multiline basic string is an error.
     let e = ctx.parse_err("a = \"hello\\\tworld\"");
     assert!(
-        matches!(e.kind(), ErrorKind::InvalidEscape('\t')),
+        matches!(e.kind(), ErrorKind::InvalidEscape),
         "backslash-tab in basic string: {:?}",
         e.kind()
     );
@@ -2218,33 +2200,33 @@ fn error_paths() {
 
     // Simple top-level duplicate key
     let e = ctx.parse_err("a = 1\na = 2");
-    assert_eq!(path(e), "a");
+    assert_eq!(path(e), "<key>");
 
     // Dotted key error shows full path
     let e = ctx.parse_err("[fruit.apple.taste]\n[fruit]\napple.taste.sweet = true");
-    assert_eq!(path(e), "fruit.apple.taste");
+    assert_eq!(path(e), "<key>.<key>.<key>");
 
     // Table header intermediate error
     let e = ctx.parse_err("[a]\nb = 1\n[a]\nc = 2");
-    assert_eq!(path(e), "a");
+    assert_eq!(path(e), "<key>");
 
     // Duplicate key inside a section
     let e = ctx.parse_err("[section]\na = 1\na = 2");
-    assert_eq!(path(e), "section.a");
+    assert_eq!(path(e), "<key>.<key>");
 
     // AOT shows index
     let e = ctx.parse_err(
         "[[servers]]\nname = 'a'\n[[servers]]\nname = 'b'\n[[servers]]\nname = 'c'\nname = 'd'",
     );
-    assert_eq!(path(e), "servers[2].name");
+    assert_eq!(path(e), "<key>[2].<key>");
 
     // Nested AOT intermediate
     let e = ctx.parse_err("[[a]]\n[[a.b]]\nx = 1\n[[a.b]]\nx = 2\nx = 3");
-    assert_eq!(path(e), "a[0].b[1].x");
+    assert_eq!(path(e), "<key>[0].<key>[1].<key>");
 
     // Header key error (trailing period)
     let e = ctx.parse_err("[a.]");
-    assert_eq!(path(e), "a");
+    assert_eq!(path(e), "<key>");
 }
 
 // --- parse_recoverable tests ---

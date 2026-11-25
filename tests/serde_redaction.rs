@@ -63,14 +63,14 @@ struct Flags {
 #[test]
 fn invalid_type_does_not_echo_string() {
     let e = rs_toml::serde::from_str::<Port>(&format!("port = '{SECRET}'")).unwrap_err();
-    assert_eq!(e.message(), "invalid type: string, expected u16");
+    assert_eq!(e.message(), "invalid type: string");
     assert_redacted(&e, &[SECRET]);
 }
 
 #[test]
 fn invalid_value_does_not_echo_integer_or_float() {
     let e = rs_toml::serde::from_str::<Port>("port = 99999999").unwrap_err();
-    assert_eq!(e.message(), "invalid value: integer, expected u16");
+    assert_eq!(e.message(), "invalid value: integer");
     assert_redacted(&e, &["99999999"]);
 
     let e = rs_toml::serde::from_str::<Port>("port = -12345").unwrap_err();
@@ -91,7 +91,7 @@ fn invalid_value_does_not_echo_integer_or_float() {
 #[test]
 fn unknown_variant_from_value_is_not_echoed() {
     let e = rs_toml::serde::from_str::<WithMode>("mode = 'sk_live_SECRET'").unwrap_err();
-    assert_eq!(e.message(), "unknown variant, expected `Read` or `Write`");
+    assert_eq!(e.message(), "unknown variant");
     assert_redacted(&e, &["sk_live_SECRET"]);
 
     // Externally tagged table form.
@@ -107,7 +107,7 @@ fn unknown_variant_from_value_is_not_echoed() {
 #[test]
 fn bool_and_wide_integer_are_not_echoed() {
     let e = rs_toml::serde::from_str::<Port>("port = true").unwrap_err();
-    assert_eq!(e.message(), "invalid type: boolean, expected u16");
+    assert_eq!(e.message(), "invalid type: boolean");
 
     let src = "port = 170141183460469231731687303715884105727";
     let e = rs_toml::serde::from_str::<Port>(src).unwrap_err();
@@ -115,7 +115,7 @@ fn bool_and_wide_integer_are_not_echoed() {
 }
 
 #[test]
-fn unknown_field_keeps_the_key_name() {
+fn unknown_field_hides_the_key_name() {
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     #[allow(dead_code)]
@@ -124,7 +124,7 @@ fn unknown_field_keeps_the_key_name() {
     }
     let e =
         rs_toml::serde::from_str::<Strict>(&format!("port = 1\nprot = '{SECRET}'")).unwrap_err();
-    assert!(e.message().starts_with("unknown field `prot`"), "{e}");
+    assert!(e.message().starts_with("unknown field"), "{e}");
     assert_redacted(&e, &[SECRET]);
 }
 

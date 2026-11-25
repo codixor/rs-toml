@@ -31,6 +31,14 @@ use std::hash::{Hash, Hasher};
 /// use of every recursive walk over the tree (emit, `Debug`, `Clone`,
 /// `FromToml`, serde).
 pub(crate) const MAX_RECURSION_DEPTH: i16 = 128;
+// The arena's packed spans reserve 28 bits per endpoint.
+const MAX_DOCUMENT_BYTES: u64 = (1 << 28) - 1;
+pub(crate) const LEGACY_LIMITS: crate::Limits = crate::Limits {
+    max_depth: MAX_RECURSION_DEPTH as u32 + 1,
+    max_document_bytes: MAX_DOCUMENT_BYTES,
+    max_token_bytes: usize::MAX,
+    max_expansion: 0,
+};
 
 struct Ctx<'b, 'de> {
     /// The current table context.
@@ -116,10 +124,13 @@ struct Parser<'de> {
     /// Raw bytes of `src`.
     bytes: &'de [u8],
     cursor: usize,
+    max_nested: i16,
+    max_token: usize,
     arena: &'de Arena,
 
     // Error context, populated just before returning Failed
     error_span: Span,
+    error_location: crate::error::Location,
     error_kind: Option<ErrorKind<'static>>,
 
     // TOML path tracking for error context (zero-cost on happy path)
@@ -137,7 +148,7 @@ struct Parser<'de> {
 }
 
 impl<'de> Parser<'de> {
-    fn new(input: &'de str, arena: &'de Arena) -> Self {
+    fn new(input: &'de str, arena: &'de Arena, limits: &crate::Limits) -> Self {
         let bytes = input.as_bytes();
         // Skip UTF-8 BOM (U+FEFF = EF BB BF) if present at the start.
         let cursor = if bytes.starts_with(b"\xef\xbb\xbf") {
@@ -149,8 +160,14 @@ impl<'de> Parser<'de> {
             src: input,
             bytes,
             cursor,
+            max_nested: limits
+                .max_depth
+                .saturating_sub(1)
+                .min(MAX_RECURSION_DEPTH as u32) as i16,
+            max_token: limits.max_token_bytes,
             arena,
             error_span: Span::new(0, 0),
+            error_location: Default::default(),
             error_kind: None,
             path: [PathComponent::Index(0); 16],
             path_len: 0,
@@ -228,6 +245,7 @@ impl<'de> Parser<'de> {
         std::hint::black_box(&self.bytes.iter().enumerate().next());
 
         Error::new_with_path(kind, span, path)
+            .at_parser_position(self.src, &mut self.error_location)
     }
 
     #[inline]
@@ -323,9 +341,12 @@ impl<'de> Parser<'de> {
         if !self.eat_byte(b'#') {
             return Ok(false);
         }
-        while let Some(0x09 | 0x20..=0x7E | 0x80..) = self.peek_byte() {
+        let body = self.cursor;
+        let scan_end = self.token_scan_end(body);
+        while let Some(0x09 | 0x20..=0x7E | 0x80..) = self.bytes[..scan_end].get(self.cursor) {
             self.cursor += 1;
         }
+        self.check_token(body, self.cursor)?;
         self.eat_newline_or_eof().map(|()| true)
     }
 
@@ -384,11 +405,29 @@ impl<'de> Parser<'de> {
         }
     }
 
-    fn read_keylike(&mut self) -> &'de str {
+    // Inspect at most one byte beyond the budget to distinguish an exact
+    // match from a longer body, even when the caller requests usize::MAX.
+    fn token_scan_end(&self, body: usize) -> usize {
+        self.bytes
+            .len()
+            .min(body.saturating_add(self.max_token).saturating_add(1))
+    }
+
+    fn check_token(&mut self, start: usize, end: usize) -> Result<(), Failed> {
+        if end - start > self.max_token {
+            return Err(self.set_error(start + self.max_token, None, ErrorKind::TokenLimit));
+        }
+        Ok(())
+    }
+
+    fn read_keylike(&mut self, start: usize) -> Result<&'de str, Failed> {
         // Keylike bytes are ASCII, so the run is a `str` on its own.
-        let (key, end) = crate::raw::text::keylike_run(self.src, self.cursor);
+        let end = self.src.floor_char_boundary(self.token_scan_end(start));
+        self.check_token(start, self.cursor)?;
+        let (key, end) = crate::raw::text::keylike_run(&self.src[..end], self.cursor);
+        self.check_token(start, end)?;
         self.cursor = end;
-        key
+        Ok(key)
     }
 
     fn read_table_key(&mut self) -> Result<Key<'de>, Failed> {
@@ -437,7 +476,7 @@ impl<'de> Parser<'de> {
             }
             b if is_keylike_byte(b) => {
                 let start = self.cursor;
-                let name = self.read_keylike();
+                let name = self.read_keylike(start)?;
                 let span = Span::new(start as u32, self.cursor as u32);
                 Ok(Key { name, span })
             }
@@ -502,10 +541,10 @@ impl<'de> Parser<'de> {
     ///   * the string delimiter (`"` or `'`)
     ///   * a backslash (`\`) — benign false positive for literal strings
     ///   * past the end of input
-    fn skip_string_plain(&mut self, delim: u8) {
+    fn skip_string_plain(&mut self, delim: u8, scan_end: usize) {
         // Quick bail-out for EOF or an immediately-interesting byte.
         // Avoids SWAR setup cost for consecutive specials (e.g. \n\n).
-        let Some(&b) = self.bytes.get(self.cursor) else {
+        let Some(&b) = self.bytes[..scan_end].get(self.cursor) else {
             return;
         };
 
@@ -515,7 +554,7 @@ impl<'de> Parser<'de> {
         self.cursor += 1;
 
         let base = self.cursor;
-        let rest = &self.bytes[base..];
+        let rest = &self.bytes[base..scan_end];
 
         type Chunk = u64;
         const STEP: usize = std::mem::size_of::<Chunk>();
@@ -544,14 +583,14 @@ impl<'de> Parser<'de> {
             }
         }
 
-        self.cursor = self.bytes.len() - remainder_len;
-        self.skip_string_plain_slow(delim);
+        self.cursor = scan_end - remainder_len;
+        self.skip_string_plain_slow(delim, scan_end);
     }
 
     #[cold]
     #[inline(never)]
-    fn skip_string_plain_slow(&mut self, delim: u8) {
-        while let Some(&b) = self.bytes.get(self.cursor) {
+    fn skip_string_plain_slow(&mut self, delim: u8, scan_end: usize) {
+        while let Some(&b) = self.bytes[..scan_end].get(self.cursor) {
             if b == delim || b == b'\\' || b == 0x7F || (b < 0x20 && b != 0x09) {
                 return;
             }
@@ -566,12 +605,15 @@ impl<'de> Parser<'de> {
         multiline: bool,
         delim: u8,
     ) -> Result<(Key<'de>, bool), Failed> {
+        let body = start + if multiline { 3 } else { 1 };
+        let scan_end = self.token_scan_end(body);
         let mut flush_from = content_start;
         let mut scratch: Option<crate::arena::Scratch<'de>> = None;
         loop {
-            self.skip_string_plain(delim);
+            self.skip_string_plain(delim, scan_end);
 
             let i = self.cursor;
+            self.check_token(body, i)?;
             let Some(&b) = self.bytes.get(i) else {
                 return Err(self.set_error(
                     i,
@@ -592,7 +634,7 @@ impl<'de> Parser<'de> {
                             ));
                         }
                     } else {
-                        return Err(self.set_error(i, None, ErrorKind::InvalidCharInString('\r')));
+                        return Err(self.set_error(i, None, ErrorKind::InvalidCharInString));
                     }
                 }
                 b'\n' => {
@@ -625,6 +667,7 @@ impl<'de> Parser<'de> {
                         (Span::new(start as u32, self.cursor as u32), i)
                     };
 
+                    self.check_token(body, end)?;
                     let name = if let Some(mut s) = scratch {
                         s.extend(self.str_slice(flush_from, end));
                         s.commit()
@@ -634,10 +677,11 @@ impl<'de> Parser<'de> {
                     return Ok((Key { name, span }, multiline));
                 }
                 b'\\' if delim == b'"' => {
+                    self.check_token(body, self.cursor)?;
                     let arena = self.arena;
                     let s = scratch.get_or_insert_with(|| arena.scratch());
                     s.extend(self.str_slice(flush_from, i));
-                    if let Err(e) = self.read_basic_escape(s, start, multiline) {
+                    if let Err(e) = self.read_basic_escape(s, body, multiline) {
                         return Err(e);
                     }
                     flush_from = self.cursor;
@@ -646,7 +690,7 @@ impl<'de> Parser<'de> {
                 // from the SWAR scan.
                 0x09 | 0x20..=0x7E | 0x80.. => {}
                 _ => {
-                    return Err(self.set_error(i, None, ErrorKind::InvalidCharInString(b as char)));
+                    return Err(self.set_error(i, None, ErrorKind::InvalidCharInString));
                 }
             }
         }
@@ -692,16 +736,13 @@ impl<'de> Parser<'de> {
                             self.cursor += 1;
                             '\n'
                         } else if b == b'\r' {
-                            return Err(self.set_error(
-                                i,
-                                None,
-                                ErrorKind::InvalidCharInString('\r'),
-                            ));
+                            return Err(self.set_error(i, None, ErrorKind::InvalidCharInString));
                         } else {
                             b as char
                         };
                         if c != '\n' {
                             loop {
+                                self.check_token(string_start, self.cursor)?;
                                 match self.peek_byte() {
                                     Some(b' ' | b'\t') => {
                                         self.cursor += 1;
@@ -718,13 +759,14 @@ impl<'de> Parser<'de> {
                                         return Err(self.set_error(
                                             i,
                                             None,
-                                            ErrorKind::InvalidEscape(c),
+                                            ErrorKind::InvalidEscape,
                                         ));
                                     }
                                 }
                             }
                         }
                         loop {
+                            self.check_token(string_start, self.cursor)?;
                             match self.peek_byte() {
                                 Some(b' ' | b'\t' | b'\n') => {
                                     self.cursor += 1;
@@ -738,19 +780,17 @@ impl<'de> Parser<'de> {
                     }
                     _ => {
                         self.cursor -= 1;
-                        return Err(self.set_error(
-                            self.cursor,
-                            None,
-                            ErrorKind::InvalidEscape(self.next_char_for_error()),
-                        ));
+                        return Err(self.set_error(self.cursor, None, ErrorKind::InvalidEscape));
                     }
                 }
                 return Ok(());
             };
 
+            self.check_token(string_start, self.cursor)?;
             scratch.push(byte);
             return Ok(());
         };
+        self.check_token(string_start, self.cursor)?;
         scratch.push_char(chr);
         Ok(())
     }
@@ -775,11 +815,7 @@ impl<'de> Parser<'de> {
                 val = (val << 4) | digit as u32;
                 self.cursor += 1;
             } else {
-                return Err(self.set_error(
-                    self.cursor,
-                    None,
-                    ErrorKind::InvalidHexEscape(self.next_char_for_error()),
-                ));
+                return Err(self.set_error(self.cursor, None, ErrorKind::InvalidHexEscape));
             }
         }
         match char::from_u32(val) {
@@ -787,18 +823,11 @@ impl<'de> Parser<'de> {
             None => Err(self.set_error(
                 escape_start - 1,
                 Some(self.cursor),
-                ErrorKind::InvalidEscapeValue(val),
+                ErrorKind::InvalidEscapeValue,
             )),
         }
     }
 
-    fn next_char_for_error(&self) -> char {
-        if let Some(value) = self.src.get(self.cursor..) {
-            value.chars().next().unwrap_or(char::REPLACEMENT_CHARACTER)
-        } else {
-            char::REPLACEMENT_CHARACTER
-        }
-    }
     fn number(&mut self, start: u32, end: u32, s: &'de str, sign: u8) -> Result<Item<'de>, Failed> {
         let bytes = s.as_bytes();
 
@@ -819,7 +848,7 @@ impl<'de> Parser<'de> {
             let at = self.cursor;
             return match self.peek_byte() {
                 Some(b) if is_keylike_byte(b) => {
-                    let after = self.read_keylike();
+                    let after = self.read_keylike(start as usize)?;
                     match self.float(start, end, s, Some(after), sign) {
                         Ok(f) => Ok(Item::float_spanned(f, Span::new(start, self.cursor as u32))),
                         Err(e) => Err(e),
@@ -838,6 +867,7 @@ impl<'de> Parser<'de> {
             match DateTime::munch(head) {
                 Ok((consumed, moment)) => {
                     self.cursor = start as usize + consumed;
+                    self.check_token(start as usize, self.cursor)?;
                     return Ok(Item::moment(moment, Span::new(start, self.cursor as u32)));
                 }
                 Err(reason) if !reason.is_empty() => {
@@ -852,6 +882,7 @@ impl<'de> Parser<'de> {
                         consumed += 1;
                     }
                     self.cursor = start as usize + consumed;
+                    self.check_token(start as usize, self.cursor)?;
                     return Err(self.set_error(
                         start as usize,
                         Some(self.cursor),
@@ -1094,7 +1125,7 @@ impl<'de> Parser<'de> {
             self.eat_byte(b'+');
             match self.peek_byte() {
                 Some(b) if is_keylike_byte(b) && b != b'-' => {
-                    let next = self.read_keylike();
+                    let next = self.read_keylike(s_start)?;
                     if !scratch.push_strip_underscores(next) {
                         return Err(self.set_error(
                             s_start,
@@ -1143,6 +1174,7 @@ impl<'de> Parser<'de> {
             return Err(self.set_error(self.bytes.len(), None, ErrorKind::UnexpectedEof));
         };
         let sign = match byte {
+            b'{' | b'[' if depth_remaining == 0 => return Err(self.depth_exceeded_at(at)),
             b'"' | b'\'' => {
                 self.cursor += 1;
                 return match self.read_string(self.cursor - 1, byte) {
@@ -1182,7 +1214,7 @@ impl<'de> Parser<'de> {
             _ => 2,
         };
 
-        let key = self.read_keylike();
+        let key = self.read_keylike(at)?;
 
         let end = self.cursor as u32;
         match key {
@@ -1215,7 +1247,7 @@ impl<'de> Parser<'de> {
         if let [b'0'..=b'9', ..] = key.as_bytes() {
             self.number(at as u32, end, key, sign)
         } else if byte == b'\r' {
-            Err(self.set_error(at, None, ErrorKind::Unexpected('\r')))
+            Err(self.set_error(at, None, ErrorKind::Unexpected))
         } else if sign != 2 {
             Err(self.set_error(
                 at,
@@ -1223,7 +1255,7 @@ impl<'de> Parser<'de> {
                 ErrorKind::InvalidInteger("expected digit after sign"),
             ))
         } else if key.is_empty() {
-            Err(self.set_error(at, None, ErrorKind::Unexpected(self.next_char_for_error())))
+            Err(self.set_error(at, None, ErrorKind::Unexpected))
         } else {
             Err(self.set_error(at, Some(self.cursor), ErrorKind::UnquotedString))
         }
@@ -1234,16 +1266,6 @@ impl<'de> Parser<'de> {
         out: &mut crate::item::table::InnerTable<'de>,
         depth_remaining: i16,
     ) -> Result<(), Failed> {
-        if depth_remaining < 0 {
-            return Err(self.set_error(
-                self.cursor,
-                None,
-                ErrorKind::OutOfRange {
-                    ty: &"Max recursion depth exceeded",
-                    range: &"",
-                },
-            ));
-        }
         if let Err(e) = self.eat_inline_table_whitespace() {
             return Err(e);
         }
@@ -1262,10 +1284,10 @@ impl<'de> Parser<'de> {
             while self.eat_byte(b'.') {
                 value_depth -= 1;
                 if value_depth < 0 {
-                    return Err(self.depth_exceeded());
+                    return Err(self.depth_exceeded_at(key.span.start as usize));
                 }
                 self.eat_whitespace();
-                self.push_path(PathComponent::Key(key));
+                self.push_path(PathComponent::redacted_key(key));
                 table_ref = match self.navigate_dotted_key(table_ref, key) {
                     Ok(t) => t,
                     Err(e) => return Err(e),
@@ -1286,7 +1308,7 @@ impl<'de> Parser<'de> {
                 return Err(e);
             }
 
-            self.push_path(PathComponent::Key(key));
+            self.push_path(PathComponent::redacted_key(key));
             {
                 let val = match self.value(value_depth) {
                     Ok(v) => v,
@@ -1326,16 +1348,6 @@ impl<'de> Parser<'de> {
         out: &mut crate::item::array::InternalArray<'de>,
         depth_remaining: i16,
     ) -> Result<(), Failed> {
-        if depth_remaining < 0 {
-            return Err(self.set_error(
-                self.cursor,
-                None,
-                ErrorKind::OutOfRange {
-                    ty: &"Max recursion depth exceeded",
-                    range: &"",
-                },
-            ));
-        }
         let saved_path_len = self.path_len;
         loop {
             if let Err(e) = self.eat_intermediate() {
@@ -1413,21 +1425,14 @@ impl<'de> Parser<'de> {
     /// [`MAX_RECURSION_DEPTH`].
     fn enter_levels(&mut self, depth: &mut i16, levels: i16) -> Result<(), Failed> {
         *depth += levels;
-        if *depth > MAX_RECURSION_DEPTH {
+        if *depth > self.max_nested {
             return Err(self.depth_exceeded());
         }
         Ok(())
     }
 
     fn depth_exceeded_at(&mut self, at: usize) -> Failed {
-        self.set_error(
-            at,
-            None,
-            ErrorKind::OutOfRange {
-                ty: &"Max recursion depth exceeded",
-                range: &"",
-            },
-        )
+        self.set_error(at, None, ErrorKind::DepthLimit)
     }
 
     /// Navigate into an existing or new table for a dotted-key intermediate
@@ -1834,7 +1839,11 @@ impl<'de> Parser<'de> {
             return false;
         }
         let error = self.take_error();
+        let stop = matches!(error.kind(), ErrorKind::DepthLimit | ErrorKind::TokenLimit);
         self.errors.push(error);
+        if stop {
+            return false;
+        }
         self.path_len = 0;
         let at_line_start = self.cursor == 0 || self.bytes.get(self.cursor - 1) == Some(&b'\n');
         if at_line_start && self.at_statement_start() {
@@ -1903,7 +1912,7 @@ impl<'de> Parser<'de> {
                     };
                 }
                 Some(b'\r') => {
-                    self.set_error(self.cursor, None, ErrorKind::Unexpected('\r'));
+                    self.set_error(self.cursor, None, ErrorKind::Unexpected);
                     if !self.try_recover() {
                         return Err(Failed);
                     }
@@ -1945,7 +1954,7 @@ impl<'de> Parser<'de> {
             if self.eat_whitespace_to() == Some(b'.') {
                 self.cursor += 1;
                 self.eat_whitespace();
-                self.push_path(PathComponent::Key(key));
+                self.push_path(PathComponent::redacted_key(key));
                 current = match self.navigate_header_intermediate(current, key, &mut depth) {
                     Ok(p) => p,
                     Err(e) => return Err(e),
@@ -1979,11 +1988,11 @@ impl<'de> Parser<'de> {
 
         // The final segment adds a table, or an array plus its new entry.
         depth += if is_array { 2 } else { 1 };
-        if depth > MAX_RECURSION_DEPTH {
+        if depth > self.max_nested {
             return Err(self.depth_exceeded_at(header_start as usize));
         }
 
-        self.push_path(PathComponent::Key(key));
+        self.push_path(PathComponent::redacted_key(key));
         let result = if is_array {
             self.navigate_header_array_final(current, key, header_start, header_end)
         } else {
@@ -2013,14 +2022,14 @@ impl<'de> Parser<'de> {
         self.eat_whitespace();
 
         // Container levels still allowed below the current table.
-        let mut value_depth = MAX_RECURSION_DEPTH - ctx.depth;
+        let mut value_depth = self.max_nested - ctx.depth;
         while self.eat_byte(b'.') {
             value_depth -= 1;
             if value_depth < 0 {
-                return Err(self.depth_exceeded());
+                return Err(self.depth_exceeded_at(key.span.start as usize));
             }
             self.eat_whitespace();
-            self.push_path(PathComponent::Key(key));
+            self.push_path(PathComponent::redacted_key(key));
             table_ref = match self.navigate_dotted_key(table_ref, key) {
                 Ok(t) => t,
                 Err(e) => return Err(e),
@@ -2032,7 +2041,7 @@ impl<'de> Parser<'de> {
             self.eat_whitespace();
         }
 
-        self.push_path(PathComponent::Key(key));
+        self.push_path(PathComponent::redacted_key(key));
 
         if let Err(e) = self.expect_byte(b'=') {
             return Err(e);
@@ -2163,6 +2172,7 @@ impl<'de> Document<'de> {
     pub fn to<T: crate::FromToml<'de>>(&mut self) -> Result<T, crate::FromTomlError> {
         let result = T::from_toml(&mut self.ctx, self.table.as_item());
         crate::de::compute_paths(&self.table, &mut self.ctx.errors);
+        crate::error::locate_errors(self.ctx.source, &mut self.ctx.errors);
         match result {
             Ok(v) if self.ctx.errors.is_empty() => Ok(v),
             _ => Err(crate::de::FromTomlError {
@@ -2184,6 +2194,7 @@ impl<'de> Document<'de> {
     {
         let result = T::from_toml(&mut self.ctx, self.table.as_item());
         crate::de::compute_paths(&self.table, &mut self.ctx.errors);
+        crate::error::locate_errors(self.ctx.source, &mut self.ctx.errors);
         let errors = crate::de::FromTomlError {
             errors: std::mem::take(&mut self.ctx.errors),
         };
@@ -2243,18 +2254,25 @@ impl std::fmt::Debug for Document<'_> {
 /// ```
 #[inline(never)]
 pub fn parse<'de>(document: &'de str, arena: &'de Arena) -> Result<Document<'de>, Error> {
-    // Tag bits use the low 3 bits of start_and_tag, limiting span.start to
-    // 28 bits (256 MiB). The flag state uses the low 3 bits of end_and_flag,
-    // and bit 31 is the variant discriminator, limiting span.end to 28 bits
-    // (256 MiB).
-    const MAX_SIZE: usize = (1u32 << 28) as usize;
+    parse_with(document, arena, &LEGACY_LIMITS)
+}
 
-    if document.len() >= MAX_SIZE {
-        return Err(Error::new(ErrorKind::FileTooLarge, Span::new(0, 0)));
-    }
-
+/// Parses TOML with caller-supplied inclusive resource limits.
+///
+/// The root table counts as one container. The native maximum is 129 including
+/// the root, and the packed span format supports documents below 256 MiB.
+/// TOML has no expanding references, so its expansion cost is always zero.
+///
+/// # Errors
+/// Returns the first syntax or limit diagnostic with its original byte span.
+pub fn parse_with<'de>(
+    document: &'de str,
+    arena: &'de Arena,
+    limits: &crate::Limits,
+) -> Result<Document<'de>, Error> {
+    check_document(document, limits)?;
     let mut root_st = Table::new_spanned(Span::new(0, document.len() as u32));
-    let mut parser = Parser::new(document, arena);
+    let mut parser = Parser::new(document, arena, limits);
     match parser.parse_document(&mut root_st) {
         Ok(()) => {}
         Err(_) => return Err(parser.take_error()),
@@ -2293,36 +2311,35 @@ pub fn parse<'de>(document: &'de str, arena: &'de Arena) -> Result<Document<'de>
 /// assert!(!doc.errors().is_empty());
 /// ```
 pub fn parse_recoverable<'de>(document: &'de str, arena: &'de Arena) -> Document<'de> {
-    const MAX_SIZE: usize = (1u32 << 28) as usize;
-    let mut parser = Parser::new(document, arena);
-    parser.recovering = true;
+    parse_recoverable_with(document, arena, &LEGACY_LIMITS)
+}
 
-    if document.len() >= MAX_SIZE {
-        parser
-            .errors
-            .push(Error::new(ErrorKind::FileTooLarge, Span::new(0, 0)));
+/// Parses with recovery and inclusive limits. A limit error stops recovery.
+pub fn parse_recoverable_with<'de>(
+    document: &'de str,
+    arena: &'de Arena,
+    limits: &crate::Limits,
+) -> Document<'de> {
+    if let Err(error) = check_document(document, limits) {
         return Document {
             table: Table::new_spanned(Span::new(0, 0)),
             ctx: crate::de::Context {
-                errors: parser.errors,
-                index: parser.index,
+                errors: vec![error],
+                index: Default::default(),
                 arena,
                 source: document,
             },
         };
     }
 
+    let mut parser = Parser::new(document, arena, limits);
+    parser.recovering = true;
     let mut root_st = Table::new_spanned(Span::new(0, document.len() as u32));
     let failed = parser.parse_document(&mut root_st).is_err();
 
-    if failed {
-        if let Some(kind) = parser.error_kind.take() {
-            parser.errors.push(Error::new_with_path(
-                kind,
-                parser.error_span,
-                parser.build_error_path(),
-            ));
-        }
+    if failed && parser.error_kind.is_some() {
+        let error = parser.take_error();
+        parser.errors.push(error);
     }
 
     Document {
@@ -2334,6 +2351,18 @@ pub fn parse_recoverable<'de>(document: &'de str, arena: &'de Arena) -> Document
             source: document,
         },
     }
+}
+
+fn check_document(document: &str, limits: &crate::Limits) -> Result<(), Error> {
+    let max = limits.max_document_bytes.min(MAX_DOCUMENT_BYTES);
+    let (kind, at) = if document.len() as u64 > max {
+        (ErrorKind::FileTooLarge, max as u32)
+    } else if limits.max_depth == 0 {
+        (ErrorKind::DepthLimit, 0)
+    } else {
+        return Ok(());
+    };
+    Err(Error::new(kind, Span::new(at, at)).at_parser_position(document, &mut Default::default()))
 }
 
 use crate::raw::text::is_keylike_byte;

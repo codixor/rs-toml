@@ -106,7 +106,7 @@ fn public_error_types_are_send_and_sync() {
     assert_send_sync::<rs_toml::serde::Error>();
 }
 
-/// Conversion errors are resolved to real paths before they are returned,
+/// Conversion errors own their redacted paths before they are returned,
 /// so an error can outlive the document and arena and still be read on
 /// another thread.
 #[test]
@@ -117,5 +117,5 @@ fn conversion_error_outlives_document_on_another_thread() {
         let error = &err.errors[0];
         error.path().map(ToString::to_string)
     });
-    assert_eq!(handle.join().unwrap().as_deref(), Some("b"));
+    assert_eq!(handle.join().unwrap().as_deref(), Some("\"<key>\""));
 }
