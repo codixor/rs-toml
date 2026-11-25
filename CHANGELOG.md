@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Enforce token limits during recovery, datetime scanning and escape decoding.
+- Report incomplete numeric and temporal values at EOF. Preserve key and value
+  locations during typed conversion and report a missing required item once.
+- Expose `PathComponent` so callers can read spans from redacted diagnostic paths.
+
 ## 0.4.0
 
 - Add `parse_with`, `parse_recoverable_with`, `from_str_with` and
