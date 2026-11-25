@@ -4,9 +4,12 @@ use crate::{Category, FormatError, Key, Position, Span};
 use core::num::NonZeroU32;
 use std::fmt::{self, Debug, Display};
 
+/// One step in a diagnostic's structural TOML path.
 #[derive(Clone, Copy)]
 pub enum PathComponent<'de> {
+    /// A redacted key with its original source span.
     Key(Key<'de>),
+    /// A zero-based array index.
     Index(usize),
 }
 
@@ -429,7 +432,10 @@ impl Error {
                 Category::Limit
             }
             ErrorKind::UnexpectedEof => Category::Eof,
-            ErrorKind::UnterminatedString(_)
+            ErrorKind::InvalidFloat(_)
+            | ErrorKind::InvalidInteger(_)
+            | ErrorKind::InvalidDateTime(_)
+            | ErrorKind::UnterminatedString(_)
             | ErrorKind::UnclosedArray
             | ErrorKind::UnclosedInlineTable
                 if self.span.start as usize == source.len() =>

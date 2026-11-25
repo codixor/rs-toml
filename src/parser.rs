@@ -707,6 +707,7 @@ impl<'de> Parser<'de> {
             return Err(self.set_error(i, Some(i), ErrorKind::UnterminatedString('"')));
         };
         self.cursor = i + 1;
+        self.check_token(string_start, self.cursor)?;
         let chr: char = 'char: {
             let byte: u8 = 'byte: {
                 match b {
@@ -798,7 +799,7 @@ impl<'de> Parser<'de> {
     fn read_hex(
         &mut self,
         n: usize,
-        _string_start: usize,
+        string_start: usize,
         escape_start: usize,
     ) -> Result<char, Failed> {
         let mut val: u32 = 0;
@@ -810,6 +811,7 @@ impl<'de> Parser<'de> {
                     ErrorKind::UnterminatedString('"'),
                 ));
             };
+            self.check_token(string_start, self.cursor + 1)?;
             let digit = HEX[byte as usize];
             if digit >= 0 {
                 val = (val << 4) | digit as u32;
@@ -845,6 +847,7 @@ impl<'de> Parser<'de> {
         }
 
         if self.eat_byte(b'.') {
+            self.check_token(start as usize, self.cursor)?;
             let at = self.cursor;
             return match self.peek_byte() {
                 Some(b) if is_keylike_byte(b) => {
@@ -854,6 +857,11 @@ impl<'de> Parser<'de> {
                         Err(e) => Err(e),
                     }
                 }
+                None if self.float(start, end, s, Some("0"), sign).is_ok() => Err(self.set_error(
+                    at,
+                    None,
+                    ErrorKind::InvalidFloat("nothing after decimal point"),
+                )),
                 _ => Err(self.set_error(
                     start as usize,
                     Some(at),
@@ -863,7 +871,11 @@ impl<'de> Parser<'de> {
         }
 
         if sign == 2 {
-            let head = &self.bytes[start as usize..];
+            let body = start as usize;
+            // A space after the date belongs to the token only when a time follows.
+            let scan_end = self.token_scan_end(body);
+            let lookahead = scan_end.saturating_add(1).min(self.bytes.len());
+            let head = &self.bytes[body..lookahead];
             match DateTime::munch(head) {
                 Ok((consumed, moment)) => {
                     self.cursor = start as usize + consumed;
@@ -871,20 +883,30 @@ impl<'de> Parser<'de> {
                     return Ok(Item::moment(moment, Span::new(start, self.cursor as u32)));
                 }
                 Err(reason) if !reason.is_empty() => {
-                    let rest = &self.bytes[start as usize..];
+                    let rest = &self.bytes[body..scan_end];
                     let mut consumed = 0;
                     while consumed < rest.len()
-                        && !matches!(
-                            rest[consumed],
-                            b' ' | b'\t' | b'\n' | b'\r' | b'#' | b',' | b']' | b'}'
-                        )
+                        && ((consumed == 10
+                            && rest[consumed] == b' '
+                            && self.bytes.get(body + 11).is_some_and(u8::is_ascii_digit))
+                            || !matches!(
+                                rest[consumed],
+                                b' ' | b'\t' | b'\n' | b'\r' | b'#' | b',' | b']' | b'}'
+                            ))
                     {
                         consumed += 1;
                     }
                     self.cursor = start as usize + consumed;
                     self.check_token(start as usize, self.cursor)?;
+                    let error_start = if reason == crate::time::INCOMPLETE_DATETIME
+                        && self.cursor == self.bytes.len()
+                    {
+                        self.cursor
+                    } else {
+                        start as usize
+                    };
                     return Err(self.set_error(
-                        start as usize,
+                        error_start,
                         Some(self.cursor),
                         ErrorKind::InvalidDateTime(reason),
                     ));
@@ -1014,6 +1036,9 @@ impl<'de> Parser<'de> {
         let mut error_span = span;
         let reason = 'error: {
             if bytes.is_empty() {
+                if self.peek_byte().is_none() {
+                    error_span = Span::new(span.end, span.end);
+                }
                 break 'error "no digits after prefix";
             }
 
@@ -1123,6 +1148,7 @@ impl<'de> Parser<'de> {
         // e.g. "1e-5" stays in one token and needs no special handling).
         if matches!(last.as_bytes().last(), Some(b'e' | b'E')) {
             self.eat_byte(b'+');
+            self.check_token(s_start, self.cursor)?;
             match self.peek_byte() {
                 Some(b) if is_keylike_byte(b) && b != b'-' => {
                     let next = self.read_keylike(s_start)?;
@@ -1134,6 +1160,7 @@ impl<'de> Parser<'de> {
                         ));
                     }
                 }
+                None => {}
                 _ => {
                     return Err(self.set_error(
                         s_start,
@@ -1142,6 +1169,27 @@ impl<'de> Parser<'de> {
                     ));
                 }
             }
+        }
+
+        if self.peek_byte().is_none()
+            && matches!(
+                scratch.as_str().as_bytes(),
+                [.., b'e' | b'E'] | [.., b'e' | b'E', b'-']
+            )
+        {
+            scratch.push(b'0');
+            if scratch.as_str().parse::<f64>().is_ok() {
+                return Err(self.set_error(
+                    self.cursor,
+                    None,
+                    ErrorKind::InvalidFloat("exponent requires at least one digit"),
+                ));
+            }
+            return Err(self.set_error(
+                s_start,
+                Some(self.cursor),
+                ErrorKind::InvalidFloat("invalid exponent"),
+            ));
         }
 
         // Scratch is not committed — arena pointer stays unchanged, space is
@@ -1249,8 +1297,13 @@ impl<'de> Parser<'de> {
         } else if byte == b'\r' {
             Err(self.set_error(at, None, ErrorKind::Unexpected))
         } else if sign != 2 {
+            let start = if key.is_empty() && self.peek_byte().is_none() {
+                self.cursor
+            } else {
+                at
+            };
             Err(self.set_error(
-                at,
+                start,
                 Some(self.cursor),
                 ErrorKind::InvalidInteger("expected digit after sign"),
             ))
@@ -1758,39 +1811,42 @@ impl<'de> Parser<'de> {
         }
     }
 
-    fn skip_recovery_string(&mut self) {
+    fn skip_recovery_string(&mut self) -> Result<(), Failed> {
         let delim = self.bytes[self.cursor];
         self.cursor += 1;
         let multiline = self.peek_byte() == Some(delim) && self.peek_byte_at(1) == Some(delim);
         if multiline {
             self.cursor += 2;
-            loop {
-                match self.peek_byte() {
-                    None => return,
-                    Some(b)
-                        if b == delim
-                            && self.peek_byte_at(1) == Some(delim)
-                            && self.peek_byte_at(2) == Some(delim) =>
-                    {
-                        self.cursor += 3;
-                        while self.peek_byte() == Some(delim) {
-                            self.cursor += 1;
-                        }
-                        return;
-                    }
-                    Some(b'\\') if delim == b'"' => self.cursor += 2,
-                    _ => self.cursor += 1,
-                }
-            }
         }
+        let body = self.cursor;
         loop {
+            self.check_token(body, self.cursor)?;
             match self.peek_byte() {
-                None | Some(b'\n') => return,
+                None => return Ok(()),
+                Some(b'\n') if !multiline => return Ok(()),
                 Some(b) if b == delim => {
+                    let close = self.cursor;
                     self.cursor += 1;
-                    return;
+                    if !multiline {
+                        return Ok(());
+                    }
+                    if self.eat_byte(delim) && self.eat_byte(delim) {
+                        let mut end = close;
+                        for _ in 0..2 {
+                            if self.eat_byte(delim) {
+                                end += 1;
+                            }
+                        }
+                        return self.check_token(body, end);
+                    }
                 }
-                Some(b'\\') if delim == b'"' => self.cursor += 2,
+                Some(b'\\') if delim == b'"' => {
+                    self.cursor += 1;
+                    self.check_token(body, self.cursor)?;
+                    if self.peek_byte().is_some() {
+                        self.cursor += 1;
+                    }
+                }
                 _ => self.cursor += 1,
             }
         }
@@ -1801,10 +1857,10 @@ impl<'de> Parser<'de> {
             || matches!(self.peek_byte(), Some(b) if is_keylike_byte(b) || b == b'"' || b == b'\'')
     }
 
-    fn skip_to_next_statement(&mut self) {
+    fn skip_to_next_statement(&mut self) -> Result<(), Failed> {
         loop {
             match self.peek_byte() {
-                None => return,
+                None => return Ok(()),
                 Some(b'\n') => {
                     self.cursor += 1;
                     let saved = self.cursor;
@@ -1813,19 +1869,34 @@ impl<'de> Parser<'de> {
                     }
                     if self.at_statement_start() {
                         self.cursor = saved;
-                        return;
+                        return Ok(());
                     }
                     self.cursor = saved;
                 }
-                Some(b'"' | b'\'') => self.skip_recovery_string(),
+                Some(b'"' | b'\'') => self.skip_recovery_string()?,
                 Some(b'#') => {
                     self.cursor += 1;
+                    let body = self.cursor;
                     while let Some(b) = self.peek_byte() {
-                        if b == b'\n' {
+                        if matches!(b, b'\n' | b'\r') {
                             break;
                         }
                         self.cursor += 1;
+                        self.check_token(body, self.cursor)?;
                     }
+                }
+                Some(b'0'..=b'9' | b'+' | b'-') => {
+                    let start = self.cursor;
+                    if self.value(self.max_nested).is_err()
+                        && matches!(self.error_kind, Some(ErrorKind::TokenLimit))
+                    {
+                        return Err(Failed);
+                    }
+                    self.error_kind = None;
+                    self.cursor = self.cursor.max(start + 1);
+                }
+                Some(b) if is_keylike_byte(b) => {
+                    self.read_keylike(self.cursor)?;
                 }
                 _ => self.cursor += 1,
             }
@@ -1850,7 +1921,10 @@ impl<'de> Parser<'de> {
             return self.errors.len() < Self::MAX_RECOVER_ERRORS;
         }
         let _before = self.cursor;
-        self.skip_to_next_statement();
+        if self.skip_to_next_statement().is_err() {
+            // The caller collects the limit error left by the recovery scanner.
+            return false;
+        }
         debug_assert!(
             self.cursor > _before || self.cursor >= self.bytes.len(),
             "skip_to_next_statement did not advance cursor from {_before}",
@@ -2170,9 +2244,7 @@ impl<'de> Document<'de> {
     #[doc(alias = "deserialize")]
     #[doc(alias = "from_toml")]
     pub fn to<T: crate::FromToml<'de>>(&mut self) -> Result<T, crate::FromTomlError> {
-        let result = T::from_toml(&mut self.ctx, self.table.as_item());
-        crate::de::compute_paths(&self.table, &mut self.ctx.errors);
-        crate::error::locate_errors(self.ctx.source, &mut self.ctx.errors);
+        let result = self.convert::<T>();
         match result {
             Ok(v) if self.ctx.errors.is_empty() => Ok(v),
             _ => Err(crate::de::FromTomlError {
@@ -2192,9 +2264,7 @@ impl<'de> Document<'de> {
     where
         T: crate::de::FromToml<'de>,
     {
-        let result = T::from_toml(&mut self.ctx, self.table.as_item());
-        crate::de::compute_paths(&self.table, &mut self.ctx.errors);
-        crate::error::locate_errors(self.ctx.source, &mut self.ctx.errors);
+        let result = self.convert::<T>();
         let errors = crate::de::FromTomlError {
             errors: std::mem::take(&mut self.ctx.errors),
         };
@@ -2202,6 +2272,15 @@ impl<'de> Document<'de> {
             Ok(v) => Ok((v, errors)),
             _ => Err(errors),
         }
+    }
+
+    fn convert<T: crate::FromToml<'de>>(&mut self) -> Result<T, Failed> {
+        let cursor = self.ctx.location.take();
+        let result = T::from_toml(&mut self.ctx, self.table.as_item());
+        self.ctx.location = cursor;
+        crate::de::compute_paths(&self.table, &mut self.ctx.errors);
+        crate::error::locate_errors(self.ctx.source, &mut self.ctx.errors);
+        result
     }
 
     /// Returns the accumulated errors.
@@ -2286,6 +2365,7 @@ pub fn parse_with<'de>(
             index: parser.index,
             arena,
             source: document,
+            location: Some(Default::default()),
         },
     })
 }
@@ -2328,6 +2408,7 @@ pub fn parse_recoverable_with<'de>(
                 index: Default::default(),
                 arena,
                 source: document,
+                location: Some(Default::default()),
             },
         };
     }
@@ -2349,6 +2430,7 @@ pub fn parse_recoverable_with<'de>(
             index: parser.index,
             arena,
             source: document,
+            location: Some(Default::default()),
         },
     }
 }

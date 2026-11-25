@@ -391,6 +391,7 @@ fn require_custom_string_and_context_errors() {
         index: Default::default(),
         errors: Vec::new(),
         source: "",
+        location: Some(Default::default()),
     };
     let _ = ctx.report_error_at("something went wrong", span);
     let _ = ctx.push_error(Error::new(crate::ErrorKind::InvalidInteger(""), span));

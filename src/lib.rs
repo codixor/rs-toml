@@ -212,7 +212,7 @@ pub use de::{Context, FromFlattened, FromToml, TableHelper};
 pub use emit::Indent;
 use emit::{EmitConfig, emit_with_config};
 use emit::{reproject, reproject_with_span_identity};
-pub use error::{Error, ErrorKind, TomlPath};
+pub use error::{Error, ErrorKind, PathComponent, TomlPath};
 pub use item::array::Array;
 pub use item::table::Table;
 pub use item::{ArrayStyle, Integer, Item, Key, Kind, MaybeItem, TableStyle, Value, ValueMut};

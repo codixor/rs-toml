@@ -206,6 +206,9 @@ pub mod flatten_any {
             if std::ptr::addr_eq(error.path.uncomputed_ptr(), partial) {
                 error.path = MaybeTomlPath::uncomputed(parent.as_item());
                 error.span = parent.span();
+                if let Some(cursor) = &mut ctx.location {
+                    error.position = cursor.advance(ctx.source, error.span.start);
+                }
                 continue;
             }
             let ptr = error.path.uncomputed_ptr().addr();

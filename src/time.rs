@@ -442,6 +442,8 @@ impl FromStr for DateTime {
     }
 }
 
+pub(crate) const INCOMPLETE_DATETIME: &str = "incomplete datetime";
+
 impl DateTime {
     /// Maximum number of bytes produced by [`DateTime::format`].
     ///
@@ -515,6 +517,30 @@ impl DateTime {
                 }
                 i += 1;
                 continue;
+            }
+            if i == input.len() {
+                // Only classify a prefix as incomplete when more digits or
+                // punctuation could still form a valid component.
+                let can_finish = |max: u32| len == 0 || (len == 1 && current * 10 <= max);
+                let incomplete = match state {
+                    State::Year => false,
+                    State::Month => can_finish(12) || (len == 2 && (1..=12).contains(&current)),
+                    State::Day => {
+                        can_finish(u32::from(days_in_month(value.date.year, value.date.month)))
+                    }
+                    State::Hour => can_finish(23) || (len == 2 && current <= 23),
+                    State::Minute => can_finish(59),
+                    State::Second => can_finish(60),
+                    State::Frac => len == 0,
+                    State::OffHour if value.flags & HAS_DATE != 0 => {
+                        can_finish(23) || (len == 2 && current <= 23)
+                    }
+                    State::OffMin if value.flags & HAS_DATE != 0 => can_finish(59),
+                    State::OffHour | State::OffMin => false,
+                };
+                if incomplete {
+                    return Err(INCOMPLETE_DATETIME);
+                }
             }
             'next: {
                 match state {
