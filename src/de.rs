@@ -328,11 +328,7 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
     /// [`MissingField`](crate::ErrorKind::MissingField) error if the key is
     /// absent.
     pub fn required_item(&mut self, name: &'static str) -> Result<&'t Item<'de>, Failed> {
-        if let Ok((_, item)) = self.required_entry(name) {
-            Ok(item)
-        } else {
-            Err(self.report_missing_field(name))
-        }
+        self.required_entry(name).map(|(_, item)| item)
     }
 
     /// Returns the raw [`Item`] for an optional field.
@@ -390,7 +386,7 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
 
     #[cold]
     fn report_missing_field(&mut self, name: &'static str) -> Failed {
-        self.ctx.errors.push(Error::new_with_path(
+        self.ctx.push_error(Error::new_with_path(
             ErrorKind::MissingField(name),
             self.table.span(),
             MaybeTomlPath::uncomputed(self.table.as_item()),
@@ -475,7 +471,7 @@ impl<'ctx, 't, 'de> TableHelper<'ctx, 't, 'de> {
         let mut had_unexpected = false;
         for (i, (key, item)) in self.table.entries().iter().enumerate() {
             if !self.used.get(i) {
-                self.ctx.errors.push(Error::new_with_path(
+                self.ctx.push_error(Error::new_with_path(
                     ErrorKind::UnexpectedKey { tag: 0 },
                     key.span,
                     MaybeTomlPath::uncomputed(item),
@@ -502,6 +498,8 @@ pub struct Context<'de> {
     pub(crate) index: HashMap<KeyRef<'de>, usize>,
     pub errors: Vec<Error>,
     pub(crate) source: &'de str,
+    // Bulk conversion locates errors together in source order.
+    pub(crate) location: Option<crate::error::Location>,
 }
 
 impl<'de> Context<'de> {
@@ -518,7 +516,7 @@ impl<'de> Context<'de> {
         found: &Item<'de>,
     ) -> Failed {
         let path = MaybeTomlPath::uncomputed(found);
-        self.errors.push(Error::new_with_path(
+        self.push_error(Error::new_with_path(
             ErrorKind::Wanted {
                 expected: message,
                 found: found.type_str(),
@@ -537,7 +535,7 @@ impl<'de> Context<'de> {
         found: &Item<'de>,
     ) -> Failed {
         let path = MaybeTomlPath::uncomputed(found);
-        self.errors.push(Error::new_with_path(
+        self.push_error(Error::new_with_path(
             ErrorKind::UnexpectedVariant { expected },
             found.span(),
             path,
@@ -548,12 +546,17 @@ impl<'de> Context<'de> {
     /// Records a custom error message at the given span and returns [`Failed`].
     #[cold]
     pub fn report_error_at(&mut self, message: &'static str, at: Span) -> Failed {
-        self.errors.push(Error::custom_static(message, at));
+        self.push_error(Error::custom_static(message, at));
         Failed
     }
     /// Pushes a pre-built [`Error`] and returns [`Failed`].
     #[cold]
-    pub fn push_error(&mut self, error: Error) -> Failed {
+    pub fn push_error(&mut self, mut error: Error) -> Failed {
+        if error.category == crate::Category::Data
+            && let Some(cursor) = &mut self.location
+        {
+            error.position = cursor.advance(self.source, error.span.start);
+        }
         self.errors.push(error);
         Failed
     }
@@ -573,7 +576,7 @@ impl<'de> Context<'de> {
         found: &Item<'de>,
     ) -> Failed {
         let path = MaybeTomlPath::uncomputed(found);
-        self.errors.push(Error::new_with_path(
+        self.push_error(Error::new_with_path(
             ErrorKind::OutOfRange { ty, range },
             found.span(),
             path,
@@ -588,7 +591,7 @@ impl<'de> Context<'de> {
     #[cold]
     pub fn report_missing_field(&mut self, name: &'static str, item: &Item<'de>) -> Failed {
         let path = MaybeTomlPath::uncomputed(item);
-        self.errors.push(Error::new_with_path(
+        self.push_error(Error::new_with_path(
             ErrorKind::MissingField(name),
             item.span(),
             path,
@@ -631,7 +634,7 @@ impl<'de> Context<'de> {
         key_span: Span,
         item: &Item<'de>,
     ) {
-        self.errors.push(Error::new_with_path(
+        self.push_error(Error::new_with_path(
             ErrorKind::Deprecated { tag, old, new },
             key_span,
             MaybeTomlPath::uncomputed(item),
@@ -642,7 +645,7 @@ impl<'de> Context<'de> {
     #[cold]
     pub fn report_unexpected_key(&mut self, tag: u32, item: &Item<'de>, key_span: Span) -> Failed {
         let path = MaybeTomlPath::uncomputed(item);
-        self.errors.push(Error::new_with_path(
+        self.push_error(Error::new_with_path(
             ErrorKind::UnexpectedKey { tag },
             key_span,
             path,

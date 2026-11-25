@@ -260,7 +260,7 @@ pub fn from_document<'de, T: de::Deserialize<'de>>(doc: &Document<'de>) -> Resul
 ///
 /// Returns an [`Error`] when the item does not match `T`.
 pub fn from_item<'de, T: de::Deserialize<'de>>(item: &Item<'de>) -> Result<T, Error> {
-    T::deserialize(ItemDeserializer::new(item))
+    T::deserialize(ItemDeserializer::new(item)).map_err(|error| error.at(item.span()))
 }
 
 /// Deepest container nesting [`ItemDeserializer`] descends into. Parsed
@@ -542,7 +542,9 @@ impl<'de> MapAccess<'de> for MapDeserializer<'_, 'de> {
             return Ok(None);
         };
         self.value = Some(value);
-        seed.deserialize(KeyDeserializer { key: *key }).map(Some)
+        seed.deserialize(KeyDeserializer { key: *key })
+            .map(Some)
+            .map_err(|error| error.at(key.span))
     }
 
     fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, Error> {

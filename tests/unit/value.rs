@@ -319,6 +319,7 @@ fn expect_helpers() {
         index: Default::default(),
         errors: Vec::new(),
         source: "",
+        location: Some(Default::default()),
     };
 
     // require_string success
