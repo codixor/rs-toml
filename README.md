@@ -47,6 +47,28 @@ Additive features:
     or value. Datetimes deserialize as RFC 3339 strings. The crate-level
     `rs_toml::from_str` stays the `FromToml` entry point.
 
+## Bounded parsing and diagnostics
+
+Use `parse_with(input, &arena, &limits)`, `parse_recoverable_with(input, &arena, &limits)`,
+`from_str_with(input, &limits)` or `serde::from_str_with(input, &limits)` to apply
+`rs_format::Limits`. With `Limits::default()` a document can contain up to 16 MiB,
+each token body up to 1 MiB, and the tree up to 128 containers including the implicit
+root table. Dotted keys and headers count their intermediate tables. Each array
+of tables counts both the array and its entry. Token lengths are encoded bytes,
+including escapes, comment whitespace and multiline content, excluding delimiters.
+TOML has no expanding references and accepts a zero expansion budget.
+
+Existing entry points retain the 0.3 limits of 129 containers including the root,
+at most 256 MiB minus one byte, and no separate token limit. The nesting and
+document ceilings also apply when a caller requests a larger budget.
+
+The crate re-exports `FormatError`, `Category`, `Position` and `Limits`.
+Parser and typed diagnostics retain their byte spans and report a zero-based
+offset and one-based line and byte column when source text is available.
+Detached items can report just an offset. Diagnostics discard custom visitor
+messages and input characters. Error paths preserve key spans and array indices,
+with a fixed placeholder for each key name.
+
 ## Examples
 
 - `cargo run -p rs-toml --example parse_document`

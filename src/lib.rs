@@ -216,8 +216,9 @@ pub use error::{Error, ErrorKind, TomlPath};
 pub use item::array::Array;
 pub use item::table::Table;
 pub use item::{ArrayStyle, Integer, Item, Key, Kind, MaybeItem, TableStyle, Value, ValueMut};
-pub use parser::parse_recoverable;
 pub use parser::{Document, parse};
+pub use parser::{parse_recoverable, parse_recoverable_with, parse_with};
+pub use rs_format::{Category, FormatError, Limits, Position};
 pub use ser::ToTomlError;
 pub use ser::{ToFlattened, ToToml};
 pub use span::{Span, Spanned};
@@ -243,8 +244,19 @@ pub mod serde;
 /// Returns a [`FromTomlError`] containing all parse or conversion errors
 /// encountered.
 pub fn from_str<T: for<'a> FromToml<'a>>(document: &str) -> Result<T, FromTomlError> {
+    from_str_with(document, &parser::LEGACY_LIMITS)
+}
+
+/// Parses and converts a TOML document using inclusive resource limits.
+///
+/// # Errors
+/// Returns the parse or conversion diagnostics, with byte positions when known.
+pub fn from_str_with<T: for<'a> FromToml<'a>>(
+    document: &str,
+    limits: &Limits,
+) -> Result<T, FromTomlError> {
     let arena = Arena::new();
-    let mut doc = match parse(document, &arena) {
+    let mut doc = match parse_with(document, &arena, limits) {
         Ok(doc) => doc,
         Err(e) => {
             return Err(FromTomlError { errors: vec![e] });
@@ -361,7 +373,7 @@ impl<'a> Formatting<'a> {
     /// is not a table.
     pub fn format(&self, value: &dyn ToToml) -> Result<String, ToTomlError> {
         let arena = Arena::new();
-        let item = value.to_toml(&arena)?;
+        let item = value.to_toml(&arena).map_err(|_| ToTomlError::rejected())?;
         let Some(table) = item.into_table() else {
             return Err(ToTomlError {
                 message: "Top-level item must be a table".into(),

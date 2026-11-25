@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::Stdio;
+// This direct dependency selects the comparison parser's optional fast path.
+use toml_parser as _;
 
 mod cargo;
 mod compile_bench;

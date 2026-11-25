@@ -8,7 +8,7 @@ jsony_bench = { git = "https://github.com/exrok/jsony" }
 toml-spanner.path = "../.."
 toml-spanner.features = ["to-toml", "from-toml", "derive"]
 oorandom = "11.1.5"
-toml = { version = "1", features = ["serde", "parse", "display", "fast_hash"] }
+rs_toml = { package = "toml", version = "1", features = ["serde", "parse", "display", "fast_hash"] }
 toml_edit = "0.25"
 toml-span = { version = "0.7" }
 toml-spanner-macros = { path = "../toml-spanner-macros" }

@@ -421,6 +421,15 @@ impl std::fmt::Display for DateTimeError {
 
 impl std::error::Error for DateTimeError {}
 
+impl crate::FormatError for DateTimeError {
+    fn category(&self) -> crate::Category {
+        crate::Category::Syntax
+    }
+    fn position(&self) -> Option<crate::Position> {
+        None
+    }
+}
+
 impl FromStr for DateTime {
     type Err = DateTimeError;
 

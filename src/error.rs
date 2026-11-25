@@ -1,6 +1,7 @@
 #![allow(clippy::question_mark)]
 
-use crate::{Key, Span};
+use crate::{Category, FormatError, Key, Position, Span};
+use core::num::NonZeroU32;
 use std::fmt::{self, Debug, Display};
 
 #[derive(Clone, Copy)]
@@ -9,37 +10,17 @@ pub enum PathComponent<'de> {
     Index(usize),
 }
 
-/// Represents the dotted path to a value within a TOML document.
-///
-/// A path is a sequence of key and index components, where each entry is
-/// either a table key or an array index. Displaying a `TomlPath` produces a
-/// human-readable dotted string such as `dependencies.serde` or
-/// `servers[0].host`.
-///
-/// Paths are computed lazily after deserialization and attached to each
-/// [`Error`]. Retrieve them with [`Error::path`].
-///
-/// # Examples
-///
-/// ```
-/// # #[cfg(not(feature = "derive"))]
-/// # fn main() {}
-/// # #[cfg(feature = "derive")]
-/// # fn main() {
-/// # use rs_toml::Arena;
-/// let arena = Arena::new();
-/// let mut doc = rs_toml::parse("[server]\nport = 'oops'", &arena).unwrap();
-///
-/// #[derive(Debug, rs_toml::Toml)]
-/// struct Config { server: Server }
-/// #[derive(Debug, rs_toml::Toml)]
-/// struct Server { port: u16 }
-///
-/// let err = doc.to::<Config>().unwrap_err();
-/// let path = err.errors[0].path().unwrap();
-/// assert_eq!(path.to_string(), "server.port");
-/// # }
-/// ```
+impl PathComponent<'_> {
+    pub(crate) fn redacted_key(key: Key<'_>) -> Self {
+        Self::Key(Key {
+            name: "<key>",
+            span: key.span,
+        })
+    }
+}
+
+/// Structural path to an error. Key components retain their spans and use
+/// the literal placeholder `<key>`; index components retain their indices.
 #[repr(transparent)]
 pub struct TomlPath<'a>([PathComponent<'a>]);
 
@@ -103,7 +84,7 @@ pub(crate) use crate::raw::path::MaybeTomlPath;
 /// | Method                                        | Returns                                                         |
 /// |-----------------------------------------------|-----------------------------------------------------------------|
 /// | [`kind()`](Self::kind)                        | The [`ErrorKind`] variant for this error                        |
-/// | [`span()`](Self::span)                        | Source [`Span`] (byte offsets), `0..0` when no location applies |
+/// | [`span()`](Self::span)                        | Source [`Span`] (byte offsets), possibly empty |
 /// | [`path()`](Self::path)                        | Optional [`TomlPath`] to the offending value                    |
 /// | [`message(source)`](Self::message)            | Human-readable diagnostic message                               |
 /// | [`primary_label()`](Self::primary_label)      | Optional `(Span, String)` label for the error site              |
@@ -193,15 +174,13 @@ pub(crate) use crate::raw::path::MaybeTomlPath;
 /// parsing phase, collecting syntax errors into the same list so valid
 /// portions of the document remain available for inspection.
 pub struct Error {
-    pub(crate) kind: ErrorInner,
+    pub(crate) kind: ErrorKind<'static>,
+    pub(crate) category: Category,
+    pub(crate) position: Option<Position>,
     pub(crate) span: Span,
     pub(crate) path: MaybeTomlPath,
 }
 
-pub(crate) enum ErrorInner {
-    Static(ErrorKind<'static>),
-    Custom(Box<str>),
-}
 /// The specific kind of error.
 #[non_exhaustive]
 #[derive(Clone, Copy)]
@@ -212,32 +191,39 @@ pub enum ErrorKind<'a> {
     /// EOF was reached when looking for a value.
     UnexpectedEof,
 
-    /// The input file is larger than the maximum supported size of 256 MiB.
+    /// The encoded document exceeds its configured or implementation limit.
     FileTooLarge,
+    /// The encoded token body exceeds its configured limit.
+    TokenLimit,
+    /// The tree exceeds its configured or implementation depth.
+    DepthLimit,
 
     /// An invalid character not allowed in a string was found.
-    InvalidCharInString(char),
+    InvalidCharInString,
 
     /// An invalid character was found as an escape.
-    InvalidEscape(char),
+    InvalidEscape,
 
     /// An invalid character was found in a hex escape.
-    InvalidHexEscape(char),
+    InvalidHexEscape,
 
     /// An invalid escape value was specified in a hex escape in a string.
     ///
     /// Valid values are in the plane of unicode codepoints.
-    InvalidEscapeValue(u32),
+    InvalidEscapeValue,
 
     /// An unexpected character was encountered, typically when looking for a
     /// value.
-    Unexpected(char),
+    Unexpected,
 
     /// An unterminated string was found where EOF or a newline was reached
     /// before the closing delimiter.
     ///
     /// The `char` is the expected closing delimiter (`"` or `'`).
     UnterminatedString(char),
+
+    /// The input array length differs from the required fixed length.
+    InvalidLength,
 
     /// An integer literal failed to parse, with an optional reason.
     InvalidInteger(&'static str),
@@ -360,12 +346,15 @@ impl<'a> ErrorKind<'a> {
             ErrorKind::Custom(_) => "Custom",
             ErrorKind::UnexpectedEof => "UnexpectedEof",
             ErrorKind::FileTooLarge => "FileTooLarge",
-            ErrorKind::InvalidCharInString(_) => "InvalidCharInString",
-            ErrorKind::InvalidEscape(_) => "InvalidEscape",
-            ErrorKind::InvalidHexEscape(_) => "InvalidHexEscape",
-            ErrorKind::InvalidEscapeValue(_) => "InvalidEscapeValue",
-            ErrorKind::Unexpected(_) => "Unexpected",
+            ErrorKind::TokenLimit => "TokenLimit",
+            ErrorKind::DepthLimit => "DepthLimit",
+            ErrorKind::InvalidCharInString => "InvalidCharInString",
+            ErrorKind::InvalidEscape => "InvalidEscape",
+            ErrorKind::InvalidHexEscape => "InvalidHexEscape",
+            ErrorKind::InvalidEscapeValue => "InvalidEscapeValue",
+            ErrorKind::Unexpected => "Unexpected",
             ErrorKind::UnterminatedString(_) => "UnterminatedString",
+            ErrorKind::InvalidLength => "InvalidLength",
             ErrorKind::InvalidInteger(_) => "InvalidInteger",
             ErrorKind::InvalidFloat(_) => "InvalidFloat",
             ErrorKind::InvalidDateTime(_) => "InvalidDateTime",
@@ -394,18 +383,15 @@ impl<'a> ErrorKind<'a> {
 impl Error {
     /// Returns the source span where this error occurred.
     ///
-    /// A span of `0..0` ([`Span::is_empty`]) means the error has no specific
-    /// source location, as with [`ErrorKind::FileTooLarge`].
+    /// An empty span can mark an insertion point or EOF. Use
+    /// [`FormatError::position`] to distinguish a known offset from no location.
     pub fn span(&self) -> Span {
         self.span
     }
 
     /// Returns the error kind.
     pub fn kind(&self) -> ErrorKind<'_> {
-        match &self.kind {
-            ErrorInner::Static(kind) => *kind,
-            ErrorInner::Custom(error) => ErrorKind::Custom(error),
-        }
+        self.kind
     }
 
     /// Returns the TOML path where this error occurred, if available.
@@ -413,40 +399,109 @@ impl Error {
         self.path.as_toml_path()
     }
 
-    /// Creates an error with a custom message at the given source span.
-    pub fn custom(message: impl ToString, span: Span) -> Error {
-        Error {
-            kind: ErrorInner::Custom(message.to_string().into()),
-            span,
-            path: MaybeTomlPath::empty(),
-        }
+    /// Creates a data error at the given span. Free-form messages are discarded.
+    pub fn custom(_message: impl ToString, span: Span) -> Error {
+        Self::new(ErrorKind::Custom("conversion failed"), span)
     }
 
-    /// Creates an error with a static message at the given source span.
-    pub(crate) fn custom_static(message: &'static str, span: Span) -> Error {
-        Error {
-            kind: ErrorInner::Static(ErrorKind::Custom(message)),
-            span,
-            path: MaybeTomlPath::empty(),
-        }
+    pub(crate) fn custom_static(_message: &'static str, span: Span) -> Error {
+        Self::new(ErrorKind::Custom("conversion failed"), span)
     }
 
-    /// Creates an error from a known error kind and span.
     pub(crate) fn new(kind: ErrorKind<'static>, span: Span) -> Error {
-        Error {
-            kind: ErrorInner::Static(kind),
-            span,
-            path: MaybeTomlPath::empty(),
-        }
+        Self::new_with_path(kind, span, MaybeTomlPath::empty())
     }
 
-    /// Creates an error from a known error kind, span, and TOML path.
     pub(crate) fn new_with_path(kind: ErrorKind<'static>, span: Span, path: MaybeTomlPath) -> Self {
-        Error {
-            kind: ErrorInner::Static(kind),
+        let position = (!span.is_empty()).then(|| offset_position(span.start));
+        Self {
+            kind,
             span,
             path,
+            position,
+            category: Category::Data,
         }
+    }
+
+    pub(crate) fn at_parser_position(mut self, source: &str, location: &mut Location) -> Self {
+        self.category = match self.kind {
+            ErrorKind::FileTooLarge | ErrorKind::DepthLimit | ErrorKind::TokenLimit => {
+                Category::Limit
+            }
+            ErrorKind::UnexpectedEof => Category::Eof,
+            ErrorKind::UnterminatedString(_)
+            | ErrorKind::UnclosedArray
+            | ErrorKind::UnclosedInlineTable
+                if self.span.start as usize == source.len() =>
+            {
+                Category::Eof
+            }
+            ErrorKind::Wanted { found: &"eof", .. } => Category::Eof,
+            _ => Category::Syntax,
+        };
+        self.position = location.advance(source, self.span.start);
+        self
+    }
+}
+
+impl FormatError for Error {
+    fn category(&self) -> Category {
+        self.category
+    }
+    fn position(&self) -> Option<Position> {
+        self.position
+    }
+}
+
+pub(crate) fn offset_position(offset: u32) -> Position {
+    Position {
+        offset: Some(u64::from(offset)),
+        line: None,
+        column: None,
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct Location {
+    offset: u32,
+    newlines: u32,
+    line_start: u32,
+}
+
+impl Location {
+    pub(crate) fn advance(&mut self, source: &str, offset: u32) -> Option<Position> {
+        if offset < self.offset {
+            *self = Self::default();
+        }
+        let segment = source
+            .as_bytes()
+            .get(self.offset as usize..offset as usize)?;
+        for (i, &byte) in segment.iter().enumerate() {
+            if byte == b'\n' {
+                self.newlines += 1;
+                self.line_start = self.offset + i as u32 + 1;
+            }
+        }
+        self.offset = offset;
+        Some(Position {
+            offset: Some(u64::from(offset)),
+            line: NonZeroU32::new(self.newlines + 1),
+            column: NonZeroU32::new(offset - self.line_start + 1),
+        })
+    }
+}
+
+// Typed conversion may report many errors in arbitrary field order. Locate them
+// in one forward scan without building an index for every line of the document.
+pub(crate) fn locate_errors(source: &str, errors: &mut [Error]) {
+    let mut pending: Vec<_> = errors
+        .iter_mut()
+        .filter(|e| e.category == Category::Data)
+        .collect();
+    pending.sort_unstable_by_key(|e| e.span.start);
+    let mut location = Location::default();
+    for error in pending {
+        error.position = location.advance(source, error.span.start);
     }
 }
 
@@ -454,12 +509,6 @@ impl<'a> Debug for ErrorKind<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.kind_name())
     }
-}
-
-fn kind_message(kind: ErrorKind<'_>) -> String {
-    let mut out = String::new();
-    kind_message_inner(kind, &mut out);
-    out
 }
 
 #[inline(never)]
@@ -470,16 +519,6 @@ fn s_push(out: &mut String, s: &str) {
 #[inline(never)]
 fn s_push_char(out: &mut String, c: char) {
     out.push(c);
-}
-
-fn push_escape(out: &mut String, c: char) {
-    if c.is_control() {
-        for esc in c.escape_default() {
-            s_push_char(out, esc);
-        }
-    } else {
-        s_push_char(out, c);
-    }
 }
 
 fn push_u32(out: &mut String, mut n: u32) {
@@ -499,164 +538,56 @@ fn push_u32(out: &mut String, mut n: u32) {
     }
 }
 
-fn kind_message_inner(kind: ErrorKind<'_>, out: &mut String) {
+fn kind_message(kind: ErrorKind<'_>) -> &'static str {
     match kind {
-        ErrorKind::Custom(message) => s_push(out, message),
-        ErrorKind::UnexpectedEof => s_push(out, "unexpected eof encountered"),
-        ErrorKind::FileTooLarge => s_push(out, "file is too large (maximum 256 MiB)"),
-        ErrorKind::InvalidCharInString(c) => {
-            s_push(out, "invalid character in string: `");
-            push_escape(out, c);
-            s_push_char(out, '`');
-        }
-        ErrorKind::InvalidEscape(c) => {
-            s_push(out, "invalid escape character in string: `");
-            push_escape(out, c);
-            s_push_char(out, '`');
-        }
-        ErrorKind::InvalidHexEscape(c) => {
-            s_push(out, "invalid hex escape character in string: `");
-            push_escape(out, c);
-            s_push_char(out, '`');
-        }
-        ErrorKind::InvalidEscapeValue(c) => {
-            s_push(out, "invalid unicode escape value `");
-            push_unicode_escape(out, c);
-            s_push_char(out, '`');
-        }
-        ErrorKind::Unexpected(c) => {
-            s_push(out, "unexpected character found: `");
-            push_escape(out, c);
-            s_push_char(out, '`');
-        }
-        ErrorKind::UnterminatedString(delim) => {
-            if delim == '\'' {
-                s_push(out, "unterminated literal string, expected `'`");
-            } else {
-                s_push(out, "unterminated basic string, expected `\"`");
-            }
-        }
-        ErrorKind::Wanted { expected, found } => {
-            s_push(out, "expected ");
-            s_push(out, expected);
-            s_push(out, ", found ");
-            s_push(out, found);
-        }
-        ErrorKind::InvalidInteger(reason)
-        | ErrorKind::InvalidFloat(reason)
-        | ErrorKind::InvalidDateTime(reason) => {
-            let prefix = match kind {
-                ErrorKind::InvalidInteger(_) => "invalid integer",
-                ErrorKind::InvalidFloat(_) => "invalid float",
-                _ => "invalid datetime",
-            };
-            s_push(out, prefix);
-            if !reason.is_empty() {
-                s_push(out, ": ");
-                s_push(out, reason);
-            }
-        }
-        ErrorKind::OutOfRange { ty, .. } => {
-            s_push(out, "value out of range for ");
-            s_push(out, ty);
-        }
-        ErrorKind::DuplicateTable { .. } => s_push(out, "redefinition of table"),
-        ErrorKind::DuplicateKey { .. } => s_push(out, "duplicate key"),
-        ErrorKind::RedefineAsArray { .. } => s_push(out, "table redefined as array"),
-        ErrorKind::MultilineStringKey => {
-            s_push(out, "multiline strings are not allowed for key");
-        }
-        ErrorKind::DottedKeyInvalidType { .. } => {
-            s_push(out, "dotted key attempted to extend non-table type");
-        }
-        ErrorKind::UnexpectedKey { .. } => s_push(out, "unexpected key"),
-        ErrorKind::UnquotedString => {
-            s_push(out, "string values must be quoted, expected string literal");
-        }
-        ErrorKind::MissingField(field) => {
-            s_push(out, "missing required key '");
-            s_push(out, field);
-            s_push_char(out, '\'');
-        }
-        ErrorKind::DuplicateField { field, .. } => {
-            s_push(out, "duplicate key '");
-            s_push(out, field);
-            s_push_char(out, '\'');
-        }
-        ErrorKind::Deprecated { old, new, .. } => {
-            s_push(out, "key '");
-            s_push(out, old);
-            s_push(out, "' is deprecated, use '");
-            s_push(out, new);
-            s_push(out, "' instead");
-        }
-        ErrorKind::UnexpectedValue { expected } => {
-            s_push(out, "unexpected value, expected one of: ");
-            let mut first = true;
-            for val in expected {
-                if !first {
-                    s_push(out, ", ");
-                }
-                first = false;
-                s_push(out, val);
-            }
-        }
-        ErrorKind::UnexpectedVariant { expected } => {
-            s_push(out, "unknown variant, expected one of: ");
-            let mut first = true;
-            for val in expected {
-                if !first {
-                    s_push(out, ", ");
-                }
-                first = false;
-                s_push(out, val);
-            }
-        }
-        ErrorKind::MissingArrayComma => {
-            s_push(out, "missing comma between elements, expected `,` in array");
-        }
-        ErrorKind::UnclosedArray => s_push(out, "unclosed array, expected `]`"),
-        ErrorKind::MissingInlineTableComma => {
-            s_push(
-                out,
-                "missing comma between fields, expected `,` in inline table",
-            );
-        }
-        ErrorKind::UnclosedInlineTable => s_push(out, "unclosed inline table, expected `}`"),
+        ErrorKind::Custom(_) => "conversion failed",
+        ErrorKind::UnexpectedEof => "unexpected end of input",
+        ErrorKind::FileTooLarge => "document byte limit exceeded",
+        ErrorKind::DepthLimit => "Max recursion depth exceeded",
+        ErrorKind::TokenLimit => "token byte limit exceeded",
+        ErrorKind::InvalidCharInString => "invalid character in string",
+        ErrorKind::InvalidEscape => "invalid escape in string",
+        ErrorKind::InvalidHexEscape => "invalid hex escape",
+        ErrorKind::InvalidEscapeValue => "invalid Unicode escape",
+        ErrorKind::Unexpected => "unexpected character",
+        ErrorKind::UnterminatedString(_) => "unterminated string",
+        ErrorKind::InvalidLength => "invalid array length",
+        ErrorKind::InvalidInteger(_) => "invalid integer",
+        ErrorKind::InvalidFloat(_) => "invalid float",
+        ErrorKind::InvalidDateTime(_) => "invalid datetime",
+        ErrorKind::OutOfRange { .. } => "value out of range",
+        ErrorKind::Wanted { .. } => "unexpected type or token",
+        ErrorKind::DuplicateTable { .. } => "redefinition of table",
+        ErrorKind::DuplicateKey { .. } | ErrorKind::DuplicateField { .. } => "duplicate key",
+        ErrorKind::RedefineAsArray { .. } => "table redefined as array",
+        ErrorKind::MultilineStringKey => "multiline keys are not allowed",
+        ErrorKind::DottedKeyInvalidType { .. } => "dotted key extends a non-table value",
+        ErrorKind::UnexpectedKey { .. } => "unexpected key",
+        ErrorKind::UnquotedString => "string values must be quoted",
+        ErrorKind::MissingField(_) => "missing required key",
+        ErrorKind::Deprecated { .. } => "deprecated key",
+        ErrorKind::UnexpectedValue { .. } => "unexpected value",
+        ErrorKind::UnexpectedVariant { .. } => "unknown variant",
+        ErrorKind::MissingArrayComma => "missing comma between array elements",
+        ErrorKind::UnclosedArray => "unclosed array",
+        ErrorKind::MissingInlineTableComma => "missing comma between inline table fields",
+        ErrorKind::UnclosedInlineTable => "unclosed inline table",
     }
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&kind_message(self.kind()))?;
-        if let Some(path) = self.path() {
-            let components: &[PathComponent<'_>] = path;
-            let display = match self.kind() {
-                ErrorKind::DuplicateField { .. } | ErrorKind::Deprecated { .. } => {
-                    &components[..components.len().saturating_sub(1)]
-                }
-                _ => components,
-            };
-            if !display.is_empty() {
-                f.write_str(" at `")?;
-                let mut out = String::new();
-                push_toml_path(&mut out, display);
-                f.write_str(&out)?;
-                f.write_str("`")?;
-            }
-        }
-        Ok(())
+        f.write_str(kind_message(self.kind))
     }
 }
 
 impl Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = self.kind();
         f.debug_struct("Error")
-            .field("kind", &kind.kind_name())
-            .field("message", &kind_message(kind))
-            .field("span", &self.span().range())
-            .field("path", &self.path())
+            .field("kind", &self.kind)
+            .field("category", &self.category)
+            .field("span", &self.span.range())
+            .field("position", &self.position)
             .finish()
     }
 }
@@ -665,11 +596,7 @@ impl std::error::Error for Error {}
 
 impl From<(ErrorKind<'static>, Span)> for Error {
     fn from((kind, span): (ErrorKind<'static>, Span)) -> Self {
-        Self {
-            kind: ErrorInner::Static(kind),
-            span,
-            path: MaybeTomlPath::empty(),
-        }
+        Self::new(kind, span)
     }
 }
 
@@ -729,184 +656,19 @@ fn push_unicode_escape(out: &mut String, n: u32) {
 }
 
 impl Error {
-    /// Returns the diagnostic message for this error, without the TOML path.
-    ///
-    /// Some error kinds extract names from `source` for richer messages.
-    pub fn message(&self, source: &str) -> String {
-        let mut out = String::new();
-        self.message_inner(source, &mut out);
-        out
+    /// Returns the diagnostic description without quoting input.
+    pub fn message(&self, _source: &str) -> String {
+        String::from(kind_message(self.kind))
     }
 
-    /// Returns the diagnostic message for this error, with the TOML path appended.
-    ///
-    /// Some error kinds extract names from `source` for richer messages.
+    /// Returns the redacted diagnostic description. Use `span` for the location.
     pub fn message_with_path(&self, source: &str) -> String {
-        let mut out = String::new();
-        self.message_inner(source, &mut out);
-        self.append_path(&mut out);
-        out
+        self.message(source)
     }
 
-    fn append_path(&self, out: &mut String) {
-        if let Some(p) = self.path() {
-            let components: &[PathComponent<'_>] = p;
-            let display = match self.kind() {
-                ErrorKind::DuplicateKey { .. }
-                | ErrorKind::DuplicateTable { .. }
-                | ErrorKind::DuplicateField { .. }
-                | ErrorKind::Deprecated { .. } => &components[..components.len().saturating_sub(1)],
-                _ => components,
-            };
-            if !display.is_empty() {
-                s_push(out, " at `");
-                push_toml_path(out, display);
-                s_push_char(out, '`');
-            }
-        }
-    }
-
-    fn message_inner(&self, source: &str, out: &mut String) {
-        let span = self.span;
-        let kind = self.kind();
-        let path = self.path();
-
-        match kind {
-            ErrorKind::DuplicateKey { .. } => {
-                if let Some(name) = source.get(span.range()) {
-                    s_push(out, "the key `");
-                    s_push(out, name);
-                    s_push(out, "` is defined multiple times in table");
-                } else {
-                    kind_message_inner(kind, out);
-                }
-            }
-            ErrorKind::DuplicateTable { name, .. } => {
-                if let Some(table_name) = source.get(name.range()) {
-                    s_push(out, "redefinition of table `");
-                    s_push(out, table_name);
-                    s_push_char(out, '`');
-                } else {
-                    kind_message_inner(kind, out);
-                }
-            }
-            ErrorKind::UnexpectedKey { .. } if path.is_none() => {
-                if let Some(key_name) = source.get(span.range()) {
-                    s_push(out, "unexpected key `");
-                    s_push(out, key_name);
-                    s_push_char(out, '`');
-                } else {
-                    kind_message_inner(kind, out);
-                }
-            }
-            ErrorKind::DuplicateField { field, .. } => {
-                if let Some(key_name) = source.get(span.range()) {
-                    if key_name == field {
-                        s_push(out, "key '");
-                        s_push(out, field);
-                        s_push(out, "' defined multiple times in same table");
-                    } else {
-                        s_push(out, "both '");
-                        s_push(out, key_name);
-                        s_push(out, "' and '");
-                        s_push(out, field);
-                        s_push(out, "' are defined but resolve to the same field");
-                    }
-                } else {
-                    kind_message_inner(kind, out);
-                }
-            }
-            // Never quote the value: configs hold secrets. The span locates it.
-            ErrorKind::UnexpectedVariant { .. } => kind_message_inner(kind, out),
-            _ => kind_message_inner(kind, out),
-        }
-    }
-
-    /// Returns the primary label span and text for this error, if any.
+    /// Returns the source span and its redacted diagnostic label.
     pub fn primary_label(&self) -> Option<(Span, String)> {
-        let mut out = String::new();
-        self.primary_label_inner(&mut out);
-        Some((self.span, out))
-    }
-
-    fn primary_label_inner(&self, out: &mut String) {
-        let kind = self.kind();
-        match kind {
-            ErrorKind::DuplicateKey { .. } => s_push(out, "duplicate key"),
-            ErrorKind::DuplicateTable { .. } => s_push(out, "duplicate table"),
-            ErrorKind::DottedKeyInvalidType { .. } => {
-                s_push(out, "attempted to extend table here");
-            }
-            ErrorKind::Unexpected(c) => {
-                s_push(out, "unexpected character '");
-                push_escape(out, c);
-                s_push_char(out, '\'');
-            }
-            ErrorKind::InvalidCharInString(c) => {
-                s_push(out, "invalid character '");
-                push_escape(out, c);
-                s_push(out, "' in string");
-            }
-            ErrorKind::InvalidEscape(c) => {
-                s_push(out, "invalid escape character '");
-                push_escape(out, c);
-                s_push(out, "' in string");
-            }
-            ErrorKind::InvalidEscapeValue(_) => s_push(out, "invalid unicode escape value"),
-            ErrorKind::InvalidInteger(_)
-            | ErrorKind::InvalidFloat(_)
-            | ErrorKind::InvalidDateTime(_) => kind_message_inner(kind, out),
-            ErrorKind::InvalidHexEscape(c) => {
-                s_push(out, "invalid hex escape '");
-                push_escape(out, c);
-                s_push_char(out, '\'');
-            }
-            ErrorKind::Wanted { expected, .. } => {
-                s_push(out, "expected ");
-                s_push(out, expected);
-            }
-            ErrorKind::MultilineStringKey => s_push(out, "multiline keys are not allowed"),
-            ErrorKind::UnterminatedString(delim) => {
-                s_push(out, "expected `");
-                s_push_char(out, delim);
-                s_push_char(out, '`');
-            }
-            ErrorKind::UnquotedString => s_push(out, "string is not quoted"),
-            ErrorKind::UnexpectedKey { .. } => s_push(out, "unexpected key"),
-            ErrorKind::MissingField(field) => {
-                s_push(out, "missing key '");
-                s_push(out, field);
-                s_push_char(out, '\'');
-            }
-            ErrorKind::DuplicateField { .. } => s_push(out, "duplicate key"),
-            ErrorKind::Deprecated { .. } => s_push(out, "deprecated key"),
-            ErrorKind::UnexpectedValue { .. } => s_push(out, "unexpected value"),
-            ErrorKind::UnexpectedVariant { expected } => {
-                s_push(out, "expected one of: ");
-                let mut first = true;
-                for val in expected {
-                    if !first {
-                        s_push(out, ", ");
-                    }
-                    first = false;
-                    s_push(out, val);
-                }
-            }
-            ErrorKind::MissingArrayComma => s_push(out, "expected `,`"),
-            ErrorKind::UnclosedArray => s_push(out, "expected `]`"),
-            ErrorKind::MissingInlineTableComma => s_push(out, "expected `,`"),
-            ErrorKind::UnclosedInlineTable => s_push(out, "expected `}`"),
-            ErrorKind::OutOfRange { range, .. } => {
-                if !range.is_empty() {
-                    s_push(out, "expected ");
-                    s_push(out, range);
-                }
-            }
-            ErrorKind::UnexpectedEof
-            | ErrorKind::RedefineAsArray { .. }
-            | ErrorKind::FileTooLarge
-            | ErrorKind::Custom(..) => {}
-        }
+        Some((self.span, String::from(kind_message(self.kind))))
     }
 
     /// Returns the secondary label span and text, if any.

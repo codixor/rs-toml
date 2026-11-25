@@ -235,7 +235,7 @@ fn deserialize_with_default_is_used_when_missing() {
 fn deserialize_with_custom_error_points_at_value() {
     let src = "listen = 'x'\n[unix]\npath = '/s'\nmode = '0777'\n";
     let e = err::<Config>(src);
-    assert!(e.message().contains("use \"0660\""), "{e}");
+    assert!(e.message() == "deserialization failed", "{e}");
     assert_eq!(spanned(src, &e), "'0777'");
 }
 
@@ -243,7 +243,7 @@ fn deserialize_with_custom_error_points_at_value() {
 fn deserialize_with_rejects_empty_vec() {
     let src = "listen = 'x'\n[[outbound]]\nurl = 'u'\nuse = []\n";
     let e = err::<Config>(src);
-    assert_eq!(e.message(), "use must name at least one use");
+    assert_eq!(e.message(), "deserialization failed");
     assert_eq!(spanned(src, &e), "[]");
 }
 
@@ -258,7 +258,7 @@ fn internally_tagged_file_variant() {
 fn internally_tagged_unknown_variant_points_at_table() {
     let src = "listen = 'x'\n[storage]\ntype = 's3'\npath = '/d'\n";
     let e = err::<Config>(src);
-    assert!(e.message().starts_with("unknown variant, expected"), "{e}");
+    assert!(e.message().starts_with("unknown variant"), "{e}");
     assert!(!e.message().contains("s3"), "{e}");
     assert_eq!(spanned(src, &e), "'s3'");
 }
@@ -267,7 +267,7 @@ fn internally_tagged_unknown_variant_points_at_table() {
 fn internally_tagged_deny_unknown_fields() {
     let src = "listen = 'x'\n[storage]\ntype = 'file'\npath = '/d'\nextra = 1\n";
     let e = err::<Config>(src);
-    assert!(e.message().starts_with("unknown field `extra`"), "{e}");
+    assert!(e.message().starts_with("unknown field"), "{e}");
     assert!(e.span().is_some());
 }
 
@@ -275,7 +275,7 @@ fn internally_tagged_deny_unknown_fields() {
 fn unknown_field_span_is_the_key() {
     let src = "listen = 'x'\n[limits]\nburst = 1\nburts = 2\n";
     let e = err::<Config>(src);
-    assert!(e.message().starts_with("unknown field `burts`"), "{e}");
+    assert!(e.message().starts_with("unknown field"), "{e}");
     assert_eq!(spanned(src, &e), "burts");
 }
 
@@ -298,7 +298,7 @@ fn wrong_type_span_is_the_value() {
 fn out_of_range_integer_span_is_the_value() {
     let src = "listen = 'x'\n[limits]\nmax_connections = 70000\n";
     let e = err::<Config>(src);
-    assert!(e.message().contains("expected u16"), "{e}");
+    assert!(e.message() == "invalid value: integer", "{e}");
     assert_eq!(spanned(src, &e), "70000");
 }
 
@@ -306,7 +306,7 @@ fn out_of_range_integer_span_is_the_value() {
 fn missing_field_span_is_the_enclosing_table() {
     let src = "listen = 'x'\n[unix]\nmode = '0600'\n";
     let e = err::<Config>(src);
-    assert_eq!(e.message(), "missing field `path`");
+    assert_eq!(e.message(), "missing field");
     let s = spanned(src, &e);
     assert!(s.contains("mode = '0600'"), "{s:?}");
     assert!(!s.contains("listen"), "{s:?}");
@@ -315,7 +315,7 @@ fn missing_field_span_is_the_enclosing_table() {
 #[test]
 fn missing_top_level_field() {
     let e = err::<Config>("mlock = true");
-    assert_eq!(e.message(), "missing field `listen`");
+    assert_eq!(e.message(), "missing field");
     assert_eq!(e.span(), Some(0..12));
 }
 
@@ -337,7 +337,7 @@ fn syntax_error_has_span() {
 fn unknown_unit_variant_points_at_value() {
     let src = "listen = 'x'\n[[outbound]]\nurl = 'a'\nuse = ['jwt', 'smtp']\n";
     let e = err::<Config>(src);
-    assert!(e.message().starts_with("unknown variant, expected"), "{e}");
+    assert!(e.message().starts_with("unknown variant"), "{e}");
     assert!(!e.message().contains("smtp"), "{e}");
     assert_eq!(spanned(src, &e), "'smtp'");
 }
@@ -504,7 +504,7 @@ fn enums_unit_external_newtype_tuple_struct() {
     assert!(err::<H>(src).span().is_some());
     let src = "e = [{ bogus = 1 }]";
     let e = err::<H>(src);
-    assert!(e.message().starts_with("unknown variant, expected"), "{e}");
+    assert!(e.message().starts_with("unknown variant"), "{e}");
     assert!(!e.message().contains("bogus"), "{e}");
     assert_eq!(spanned(src, &e), "bogus");
 }
@@ -607,7 +607,7 @@ fn newtype_unit_tuple_char_and_ignored() {
     assert_eq!(l.port, Port(2));
     let src = "port = 1\nmarker = {}\nunit = {}\npair = [1, true, 3]\nc = 'z'";
     let e = err::<T>(src);
-    assert!(e.message().starts_with("invalid length 3"), "{e}");
+    assert!(e.message().starts_with("invalid length"), "{e}");
     assert_eq!(spanned(src, &e), "[1, true, 3]");
 }
 

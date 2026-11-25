@@ -63,25 +63,18 @@ use ::serde::de::{
 use ::serde::forward_to_deserialize_any;
 
 use crate::item::Value;
-use crate::{Arena, Document, Item, Key, Span};
+use crate::{Arena, Category, Document, FormatError, Item, Key, Limits, Position, Span};
 
 /// An error from serde deserialization, with the source span where it
 /// occurred.
 ///
-/// The message follows serde's conventions (`missing field `x``,
-/// `unknown field `x`, expected ...`, `invalid type: string, expected u16`)
-/// but never contains a value from the document: invalid types and values
-/// are described by kind only (`string`, `integer`, ...), and an unknown
-/// enum variant is not quoted, because values may be secrets. Unknown and
-/// missing field names (table keys and field names of the target type)
-/// are included. Use [`span`](Self::span) to locate the offending value.
-///
-/// A message passed to [`serde::de::Error::custom`] by a `Deserialize`
-/// implementation (for example a `deserialize_with` function) is kept as
-/// written; this crate cannot redact what such code chooses to include.
+/// The message describes the failure without retaining source values, keys,
+/// custom visitor messages, or visitor-supplied expected text.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Error {
     message: Box<str>,
+    category: Category,
+    position: Option<Position>,
     span: Option<Span>,
 }
 
@@ -97,11 +90,21 @@ impl Error {
         self.span.map(Span::range)
     }
 
-    fn from_parse(error: &crate::Error, source: &str) -> Self {
-        let span = error.span();
-        Error {
-            message: error.message(source).into(),
-            span: (!span.is_empty()).then_some(span),
+    fn data(message: impl Into<Box<str>>) -> Self {
+        Self {
+            message: message.into(),
+            category: Category::Data,
+            span: None,
+            position: None,
+        }
+    }
+
+    fn from_parse(error: &crate::Error) -> Self {
+        Self {
+            message: error.to_string().into(),
+            span: error.position().map(|_| error.span()),
+            category: error.category(),
+            position: error.position(),
         }
     }
 
@@ -109,6 +112,7 @@ impl Error {
     fn at(mut self, span: Span) -> Self {
         if self.span.is_none() && !span.is_empty() {
             self.span = Some(span);
+            self.position = Some(crate::error::offset_position(span.start));
         }
         self
     }
@@ -131,41 +135,46 @@ impl fmt::Debug for Error {
 
 impl std::error::Error for Error {}
 
+impl FormatError for Error {
+    fn category(&self) -> Category {
+        self.category
+    }
+    fn position(&self) -> Option<Position> {
+        self.position
+    }
+}
+
 impl de::Error for Error {
-    fn custom<T: fmt::Display>(msg: T) -> Self {
-        Error {
-            message: msg.to_string().into(),
-            span: None,
-        }
+    fn custom<T: fmt::Display>(_msg: T) -> Self {
+        Self::data("deserialization failed")
     }
 
-    // serde's defaults for the following quote the offending input
-    // (`invalid type: string "hunter2"`, ``unknown variant `sk_live_x` ``).
-    // These overrides describe it by kind only.
-
-    fn invalid_type(unexp: Unexpected<'_>, exp: &dyn de::Expected) -> Self {
-        de::Error::custom(format_args!(
-            "invalid type: {}, expected {exp}",
-            unexpected_kind(&unexp)
-        ))
+    fn invalid_type(unexp: Unexpected<'_>, _exp: &dyn de::Expected) -> Self {
+        Self::data(format!("invalid type: {}", unexpected_kind(&unexp)))
     }
 
-    fn invalid_value(unexp: Unexpected<'_>, exp: &dyn de::Expected) -> Self {
-        de::Error::custom(format_args!(
-            "invalid value: {}, expected {exp}",
-            unexpected_kind(&unexp)
-        ))
+    fn invalid_value(unexp: Unexpected<'_>, _exp: &dyn de::Expected) -> Self {
+        Self::data(format!("invalid value: {}", unexpected_kind(&unexp)))
     }
 
-    fn unknown_variant(_variant: &str, expected: &'static [&'static str]) -> Self {
-        if expected.is_empty() {
-            de::Error::custom("unknown variant, there are no variants")
-        } else {
-            de::Error::custom(format_args!(
-                "unknown variant, expected {}",
-                OneOf(expected)
-            ))
-        }
+    fn invalid_length(_len: usize, _exp: &dyn de::Expected) -> Self {
+        Self::data("invalid length")
+    }
+
+    fn unknown_variant(_variant: &str, _expected: &'static [&'static str]) -> Self {
+        Self::data("unknown variant")
+    }
+
+    fn unknown_field(_field: &str, _expected: &'static [&'static str]) -> Self {
+        Self::data("unknown field")
+    }
+
+    fn missing_field(_field: &'static str) -> Self {
+        Self::data("missing field")
+    }
+
+    fn duplicate_field(_field: &'static str) -> Self {
+        Self::data("duplicate field")
     }
 }
 
@@ -196,30 +205,6 @@ fn unexpected_kind(unexp: &Unexpected<'_>) -> &'static str {
     }
 }
 
-/// Formats a list of expected names as serde does: "`a`", "`a` or `b`",
-/// "one of `a`, `b`, `c`".
-struct OneOf(&'static [&'static str]);
-
-impl fmt::Display for OneOf {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            [] => Ok(()),
-            [a] => write!(f, "`{a}`"),
-            [a, b] => write!(f, "`{a}` or `{b}`"),
-            names => {
-                f.write_str("one of ")?;
-                for (i, name) in names.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "`{name}`")?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Parses `source` and deserializes it into `T` with serde.
 ///
 /// # Errors
@@ -227,8 +212,16 @@ impl fmt::Display for OneOf {
 /// Returns an [`Error`] for a TOML syntax error or a value that does not
 /// match `T`, with the span of the offending key or value.
 pub fn from_str<T: DeserializeOwned>(source: &str) -> Result<T, Error> {
+    from_str_with(source, &crate::parser::LEGACY_LIMITS)
+}
+
+/// Parses and deserializes a TOML document with inclusive resource limits.
+///
+/// # Errors
+/// Returns the first parse or conversion diagnostic.
+pub fn from_str_with<T: DeserializeOwned>(source: &str, limits: &Limits) -> Result<T, Error> {
     let arena = Arena::new();
-    let doc = crate::parse(source, &arena).map_err(|e| Error::from_parse(&e, source))?;
+    let doc = crate::parse_with(source, &arena, limits).map_err(|e| Error::from_parse(&e))?;
     from_document(&doc)
 }
 
@@ -252,7 +245,13 @@ pub fn from_str<T: DeserializeOwned>(source: &str) -> Result<T, Error> {
 ///
 /// Returns an [`Error`] when the document does not match `T`.
 pub fn from_document<'de, T: de::Deserialize<'de>>(doc: &Document<'de>) -> Result<T, Error> {
-    from_item(doc.table().as_item())
+    from_item(doc.table().as_item()).map_err(|mut error| {
+        // A deserializer may return a custom error without visiting an item.
+        let span = error.span.unwrap_or_else(|| doc.table().span());
+        error.span = Some(span);
+        error.position = crate::error::Location::default().advance(doc.ctx.source(), span.start);
+        error
+    })
 }
 
 /// Deserializes one parsed [`Item`] into `T`.
@@ -299,6 +298,8 @@ impl<'a, 'de> ItemDeserializer<'a, 'de> {
         if self.depth > MAX_DEPTH {
             Err(Error {
                 message: "max recursion depth exceeded".into(),
+                category: Category::Limit,
+                position: None,
                 span: None,
             }
             .at(self.item.span()))
@@ -349,7 +350,7 @@ impl<'de> Deserializer<'de> for ItemDeserializer<'_, 'de> {
                     // self-describing visitor, or serde's buffered content
                     // for `flatten`, untagged and internally tagged enums,
                     // which cannot hold 128-bit integers.
-                    Err(de::Error::custom(
+                    Err(Error::data(
                         "integer out of 64-bit range is not supported here; \
                          only an i128 or u128 field can hold it",
                     ))
@@ -546,7 +547,7 @@ impl<'de> MapAccess<'de> for MapDeserializer<'_, 'de> {
 
     fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, Error> {
         let Some(item) = self.value.take() else {
-            return Err(de::Error::custom("value requested before its key"));
+            return Err(Error::data("value requested before its key"));
         };
         seed.deserialize(self.parent.child(item))
             .map_err(|e| e.at(item.span()))
