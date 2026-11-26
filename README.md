@@ -1,23 +1,41 @@
 # rs-toml
 
-`rs-toml` is a pure-Rust TOML parser, document/value model,
-emitter, and optional derive crate.
+`rs-toml` parses and emits TOML 1.1 in pure Rust. Its document model keeps
+source spans so you can locate a value in the original text or preserve a
+document's formatting when writing it back.
 
-The active crate shape is intentionally simple:
+## Quick start
 
-- parser, document traversal, value access, and emission are core
-- `thiserror` backs the public conversion errors
-- derive support is additive behind `derive`
-- serde support is additive behind `serde`
-- proof tests live under crate-root `tests/`
-- examples, benches, and scripts follow the same layout as the `sys-*` crates
+Version 0.4.1 requires Rust 1.100.0 or later. From your Cargo project, run
+
+```sh
+cargo add rs-toml@0.4.1
+```
+
+Put this in `src/main.rs` and run `cargo run`. The parsed document borrows
+the source text and the arena.
+
+```rust
+use rs_toml::{Arena, parse};
+
+fn main() -> Result<(), rs_toml::Error> {
+    let arena = Arena::new();
+    let doc = parse("[server]\nport = 8080", &arena)?;
+    assert_eq!(doc["server"]["port"].as_i64(), Some(8080));
+    Ok(())
+}
+```
+
+Parsing, document access and emission work with the default feature set.
+See the [API reference](https://docs.rs/rs-toml/0.4.1/rs_toml/) and
+[release notes](./CHANGELOG.md).
 
 ## Public API
 
 Core parse/document flow:
 
-- [`parse`](./src/lib.rs)
-- [`parse_recoverable`](./src/lib.rs)
+- [`parse`](./src/parser.rs)
+- [`parse_recoverable`](./src/parser.rs)
 - [`Document`](./src/parser.rs)
 - [`Item`](./src/item.rs)
 - [`Table`](./src/item/table.rs)
@@ -33,10 +51,16 @@ Typed conversion and emission:
 - [`FromTomlError`](./src/de.rs)
 - [`ToTomlError`](./src/ser.rs)
 
-Additive features:
+### Optional features
+
+Add `--features derive` or `--features serde` to the installation command.
+To enable both, use `--features derive,serde`. The public conversion errors
+use `thiserror`.
 
 - `derive`
-  - re-exports `#[derive(Toml)]` from [`rs-toml/macros`](./macros)
+  - re-exports `#[derive(Toml)]` from [`rs-toml-macros`](./macros).
+    The bare derive implements `FromToml`. Add `#[toml(Toml)]` to derive
+    `ToToml` as well.
 - `serde`
   - `Serialize` for `Item`, `Table`, `Document` and `Spanned` in
     [`impl_serde.rs`](./src/impl_serde.rs)
@@ -98,9 +122,11 @@ The crate-root golden surface now covers:
 
 ## Validation
 
-- `bash ./rs-toml/scripts/validate.sh`
-- `bash ./rs-toml/scripts/feature-matrix.sh`
-- `bash ./rs-toml/scripts/bench.sh`
+From the repository root, run
+
+- `bash ./scripts/validate.sh`
+- `bash ./scripts/feature-matrix.sh`
+- `bash ./scripts/bench.sh`
 
 The validation flow covers:
 
@@ -116,13 +142,11 @@ The committed Criterion entry point is:
 
 - `cargo bench -p rs-toml --bench toml_core -- --sample-size 20`
 
-Current bench coverage in [`toml_core.rs`](./benches/toml_core.rs):
+The suite measures parsing, emission with default and preserved formatting,
+and typed round-trips. The `serde` and `derive` features enable their
+respective benchmarks. See [`toml_core.rs`](./benches/toml_core.rs).
 
-- parse small document
-- emit small document
-- typed round-trip
-
-Current baseline from `bash ./rs-toml/scripts/bench.sh`:
+Earlier runs of [`scripts/bench.sh`](./scripts/bench.sh) recorded these timings:
 
 - `rs-toml/parse_small`: about `375-437 ns`
 - `rs-toml/emit_small`: about `633-789 ns`
@@ -133,15 +157,10 @@ simpler implementation unless a benchmarked change earns its complexity.
 
 ## KDL Interop
 
-`rs-toml` itself stays focused on TOML parsing and emission. The additive KDL
-adapter lives in [`rs-kdl`](../rs-kdl) and follows the same shape as the JSON and
-YAML bridges:
-
-- direct shared-model TOML bridge first
-- generated TOML-on-KDL contract second
-
-That keeps TOML ownership here, while `rs-kdl` stays the format adapter rather
-than the semantic hub.
+The `toml-interop` feature in `rs-kdl` provides a direct bridge between the
+TOML and KDL document models and a generated TOML-on-KDL contract, following
+the same pattern as its JSON and YAML adapters. See the
+[`rs-kdl` repository](https://github.com/codixor/rs-kdl).
 
 ## Legacy Donor Material
 
